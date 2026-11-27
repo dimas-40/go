@@ -95,6 +95,54 @@ function nearestStone(engine, x, y) {
   return { best, own, opp, ownNear, oppNear };
 }
 
+// 이 점이 '내 집 안'인가. 4방 이웃 대부분이 내 돌이고, 가까운 곳에 상대가
+// 없으면 이미 내 영역이다. AI가 자기 집을 메우며 대국을 망치는 것을 막는다.
+function ownTerritoryPoint(engine, idx, color) {
+  const size = engine.size;
+  if (engine.board[idx] !== EMPTY) return false;
+  if (engine.isEye(idx, color)) return true;
+  let ownAdj = 0;
+  for (const nb of engine.nbr[idx]) {
+    if (engine.board[nb] === color) ownAdj++;
+  }
+  if (ownAdj < 2) return false;
+  const x = idx % size;
+  const y = (idx / size) | 0;
+  let oppDist = Infinity;
+  let ownDist = Infinity;
+  for (let i = 0; i < engine.total; i++) {
+    const v = engine.board[i];
+    if (!v) continue;
+    const d = Math.abs((i % size) - x) + Math.abs(((i / size) | 0) - y);
+    if (v === color) ownDist = Math.min(ownDist, d);
+    else oppDist = Math.min(oppDist, d);
+  }
+  // 상대가 3칸 안에 없고 내 돌이 둘 이상 둘러싸면 자기 집이다.
+  return oppDist >= 3 && ownAdj >= 3 && ownDist <= 2;
+}
+
+function localProfile(engine, idx, color) {
+  const size = engine.size;
+  const x = idx % size;
+  const y = (idx / size) | 0;
+  let ownAdj = 0;
+  let oppAdj = 0;
+  let ownDist = Infinity;
+  let oppDist = Infinity;
+  for (const nb of engine.nbr[idx]) {
+    if (engine.board[nb] === color) ownAdj++;
+    else if (engine.board[nb] && engine.board[nb] !== color) oppAdj++;
+  }
+  for (let i = 0; i < engine.total; i++) {
+    const v = engine.board[i];
+    if (!v) continue;
+    const d = Math.abs((i % size) - x) + Math.abs(((i / size) | 0) - y);
+    if (v === color) ownDist = Math.min(ownDist, d);
+    else oppDist = Math.min(oppDist, d);
+  }
+  return { ownAdj, oppAdj, ownDist, oppDist };
+}
+
 function addCandidate(set, engine, idx, color = engine.turn) {
   if (!Number.isInteger(idx) || idx < 0 || idx >= engine.total) return;
   if (engine.board[idx] !== EMPTY || idx === engine.ko) return;
@@ -195,12 +243,13 @@ function buildCandidates(engine) {
   return { set, opening };
 }
 
-function staticEval(engine, idx, rng, opening) {
+function staticEval(engine, idx, rng, opening, atariOwn = [], atariOpp = []) {
   const color = engine.turn;
   const opp = opponent(color);
   const size = engine.size;
   const x = idx % size;
   const y = (idx / size) | 0;
+  const profile = localProfile(engine, idx, color);
   const sim = engine.cloneFast();
   const res = sim.playFast(idx);
   if (!res.ok) return null;
@@ -209,8 +258,33 @@ function staticEval(engine, idx, rng, opening) {
 
   let s = res.captured.length * 30;
   s += Math.min(own.liberties.length, 6) * 2.3;
-  if (own.liberties.length === 1) s -= 36;
+  if (own.liberties.length === 1) s -= 58;
   else if (own.liberties.length === 2) s -= 4.5;
+
+  // 단수당한 내 집단을 살리는 수 — 판 전체에서 가장 급한 수다.
+  let saves = 0;
+  for (const g of atariOwn) {
+    if (!g.stones.some((st) => sim.nbr[idx].includes(st))) continue;
+    const after = sim.groupAt(g.stones[0]);
+    if (after && after.liberties.length > 1) saves++;
+  }
+  if (saves) s += 14 * saves;
+  // 잡을 수 있는 상대 집단이 있는데 딴 데 두면 감점.
+  const capturesAtari = atariOpp.some((g) => res.captured.some((c) => g.stones.includes(c)));
+  if (capturesAtari) s += 10;
+  if (atariOwn.length && !saves && !capturesAtari) s -= 9;
+
+  // 자기 집 안을 메우는 수 — 눈이 아닐지라도 대국을 망친다.
+  const territoryish = !opening && ownTerritoryPoint(engine, idx, color);
+  if (territoryish) {
+    s -= 7.5;
+  } else if (!opening) {
+    if (profile.oppDist >= 3 && profile.ownAdj >= 2) s -= 3.8 + (profile.ownAdj - 2) * 2.4;
+    if (profile.oppDist >= 4 && profile.ownDist >= 2) s -= 2.2;
+  }
+
+  // 상대 진영에서 멀리 떨어진 '엉뚱한' 수. 단, 초반의 큰 자리는 허용.
+  if (!opening && engine.moveNumber > 8 && profile.oppDist >= 5 && profile.ownDist >= 3) s -= 3.2;
 
   // 인접 상대 집단의 활로를 줄이는가 · 끊는가
   const seen = new Set();
@@ -282,17 +356,27 @@ function staticEval(engine, idx, rng, opening) {
   for (const nb of sim.nbr[idx]) if (sim.board[nb] === EMPTY) emptyN++;
   s += emptyN * 0.3;
   s += rng() * 0.8;
-  return { score: s, captured: res.captured.length, liberties: own.liberties.length, stone: idx };
+  return {
+    score: s,
+    captured: res.captured.length,
+    liberties: own.liberties.length,
+    stone: idx,
+    territoryish,
+  };
 }
 
 export function candidateMoves(engine, rng = Math.random) {
   const color = engine.turn;
   const { set, opening } = buildCandidates(engine);
+  // 판 전체의 급한 곳 — 단수당한 내 집단, 잡을 수 있는 상대 집단.
+  const groups = engine.groups();
+  const atariOwn = groups.filter((g) => g.color === color && g.liberties.length === 1);
+  const atariOpp = groups.filter((g) => g.color === opponent(color) && g.liberties.length === 1);
   const out = [];
   for (const idx of set) {
     if (engine.board[idx] !== EMPTY || idx === engine.ko) continue;
     if (engine.isEye(idx, color)) continue;
-    const ev = staticEval(engine, idx, rng, opening);
+    const ev = staticEval(engine, idx, rng, opening, atariOwn, atariOpp);
     if (ev) out.push(ev);
   }
   out.sort((a, b) => b.score - a.score);
@@ -301,22 +385,26 @@ export function candidateMoves(engine, rng = Math.random) {
 
 function pickPlayoutMove(engine, rng) {
   const empties = [];
+  const useful = [];
   for (let i = 0; i < engine.total; i++) {
     if (engine.board[i] !== EMPTY || i === engine.ko) continue;
     if (engine.isEye(i, engine.turn)) continue;
     empties.push(i);
+    if (!ownTerritoryPoint(engine, i, engine.turn)) useful.push(i);
   }
-  if (!empties.length) return -1;
-  const tries = Math.min(empties.length, 12);
-  const start = (rng() * empties.length) | 0;
+  // 플레이아웃도 자기 집을 메우지 않는다. 영역은 비워 두어야 계가가 맞는다.
+  const pool = useful.length ? useful : empties;
+  if (!pool.length) return -1;
+  const tries = Math.min(pool.length, 14);
+  const start = (rng() * pool.length) | 0;
   for (let k = 0; k < tries; k++) {
-    const idx = empties[(start + k * 37) % empties.length];
+    const idx = pool[(start + k * 37) % pool.length];
     const r = engine.playFast(idx);
     if (r.ok) return idx;
   }
   // 마지막으로 전체를 한 번 훑는다(작은 보드 · 후반)
-  if (empties.length > tries) {
-    for (const idx of empties) {
+  if (pool.length > tries) {
+    for (const idx of pool) {
       const r = engine.playFast(idx);
       if (r.ok) return idx;
     }
@@ -388,6 +476,10 @@ export function chooseMove(engine, opts = {}) {
   }
 
   let candidates = candidateMoves(engine, rng);
+  // 이미 내 집 안인 곳은 후보에서 먼저 뺀다. 상대가 3칸 안에 없는데
+  // 내 돌만 둘러싸고 있으면, 그곳은 두어도 판이 바뀌지 않는 자리다.
+  const outsideOwn = candidates.filter((c) => !c.territoryish);
+  if (outsideOwn.length >= 6) candidates = outsideOwn;
   if (!candidates.length) {
     const legal = engine.legalMoves({ fast: true });
     if (!legal.length) return { move: null, reason: "no-legal-move", level };
@@ -396,8 +488,11 @@ export function chooseMove(engine, opts = {}) {
   }
   const top = pickTop(candidates, level);
   if (level === "easy") {
-    const k = Math.min(3, top.length);
-    const pick = top[(rng() * k) | 0];
+    // 쉬움도 자기 집을 메우지는 않는다. 후보가 전부 집 안이면 그때만 그대로 쓴다.
+    const safe = top.filter((c) => !c.territoryish);
+    const pool = safe.length ? safe : top;
+    const k = Math.min(3, pool.length);
+    const pick = pool[(rng() * k) | 0];
     return {
       move: pick.stone,
       reason: "heuristic",

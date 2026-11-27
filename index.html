@@ -7,7 +7,7 @@
   <meta name="description" content="귀신 선생과 함께 두는 3D 바둑. WebGPU 온톨로지 그래프, 미래 시뮬레이션, 정석·활로·연결 레슨.">
   <meta name="theme-color" content="#05070a">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23070b10'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%232bd6b0' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23e0b070'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./styles.css?v=20261127k">
+  <link rel="stylesheet" href="./styles.css?v=20261127n">
   <script type="importmap">
     {
       "imports": {
@@ -33,6 +33,8 @@
         <span id="backendBadge" class="chip">부팅 중</span>
         <span id="adapterBadge" class="chip dim">GPU 확인 중</span>
         <span id="fpsBadge" class="chip dim">-- FPS</span>
+        <button id="voiceToggleBtn" class="chip chip-btn" type="button" aria-pressed="true">음성 ON</button>
+        <button id="micBtn" class="chip chip-btn" type="button" aria-pressed="false" title="말로 두기">말하기</button>
         <button id="titleBtn" class="chip chip-btn" type="button">타이틀</button>
       </div>
     </header>
@@ -144,6 +146,17 @@
           <div class="kifu-float-head"><span>기보 · 온톨로지</span><b id="kifuFloatStatus"></b></div>
           <svg id="kifuFloat" class="kifu-svg" role="img" aria-label="수순 기보 그래프"></svg>
         </div>
+        <div id="placePanel" class="place-panel hidden" role="group" aria-label="착수 확인">
+          <span id="placeStone" class="place-stone black" aria-hidden="true"></span>
+          <div class="place-meta">
+            <small>착수 위치</small>
+            <b id="placeCoord">—</b>
+          </div>
+          <div class="place-actions">
+            <button id="placeConfirmBtn" class="btn primary small" type="button">착수</button>
+            <button id="placeCancelBtn" class="btn small" type="button">취소</button>
+          </div>
+        </div>
         <div class="match-hud" id="matchHud" aria-hidden="true">
           <div class="player-plate black" id="blackPlate">
             <span class="p-stone black"></span>
@@ -190,6 +203,12 @@
           </section>
         </div>
         <div class="right-pane" data-pane="kifu">
+          <section class="card kifu-db-card">
+            <h2>기보 데이터베이스 · 온톨로지</h2>
+            <div id="kifuDbCats" class="kdb-cats"></div>
+            <div id="kifuDbList" class="kdb-list"></div>
+            <div id="kifuDbDetail" class="kdb-detail muted">기보를 고르면 판 위에 착수 형태로 겹쳐 보여 줍니다.</div>
+          </section>
           <section class="card">
             <h2>대국 기록</h2>
             <ol id="moveLog" class="moves"></ol>
@@ -283,6 +302,6 @@
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=20261127k"></script>
+  <script type="module" src="./src/main.js?v=20261127n"></script>
 </body>
 </html>

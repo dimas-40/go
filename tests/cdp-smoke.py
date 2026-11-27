@@ -261,6 +261,53 @@ def main():
     })()""")
     report("ai_candidates", ai_candidates)
 
+    # 판은 정사각형으로 고정, 자리를 고른 뒤 '착수' 버튼으로 확정.
+    square = ev("""(() => {
+      const r = document.querySelector('.board-wrap').getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height), ratio: +(r.width / r.height).toFixed(3) };
+    })()""")
+    report("square_board", square)
+
+    ev("document.getElementById('sizeSelect').value='19'; window.__parksyGo.newGame(); window.__parksyGo.stage('Q16')")
+    wait(350)
+    staged = ev("""({
+      pending: window.__parksyGo.state.pending,
+      panel: document.getElementById('placePanel').className,
+      coord: document.getElementById('placeCoord').textContent,
+      tone: document.getElementById('placeStone').className
+    })""")
+    report("staged", staged)
+    ev("document.getElementById('placeConfirmBtn').click()")
+    wait(700)
+    confirmed = ev("""(() => {
+      const st = window.__parksyGo.state;
+      return {
+        pending: st.pending,
+        last: st.moveLog.at(-1)?.coord || null,
+        hasQ16: st.moveLog.some((m) => m.coord === 'Q16'),
+        moves: st.moveLog.length,
+        panel: document.getElementById('placePanel').className
+      };
+    })()""")
+    report("confirmed", confirmed)
+
+    # 기보 DB — 카테고리·목록·도해·판 위 겹침.
+    ev("document.querySelector('[data-tab=\"kifu\"]').click()")
+    wait(300)
+    kdb = ev("""({
+      items: document.querySelectorAll('.kdb-item').length,
+      cats: document.querySelectorAll('.kdb-cat').length
+    })""")
+    report("kdb", kdb)
+    ev("document.querySelector('.kdb-item')?.click()")
+    wait(500)
+    kdb_detail = ev("""({
+      stones: document.querySelectorAll('.kdb-board circle').length,
+      record: window.__parksyGo.state.kifuRecordId,
+      demo: window.__parksyGo.state.kifuDemo?.line?.length || 0
+    })""")
+    report("kdb_detail", kdb_detail)
+
     # 세로 화면(휴대폰)에서 판이 잘리지 않는지.
     send("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
     wait(400)
@@ -294,6 +341,29 @@ def main():
         problems.append("AI candidates missing")
     if (ac.get("center_hits") or 0) > 0:
         problems.append("AI candidates clustered at center")
+    sq = square or {}
+    if not sq.get("w") or not sq.get("h") or abs((sq.get("ratio") or 0) - 1) > 0.02:
+        problems.append("board is not square")
+    stg = staged or {}
+    if not stg.get("pending"):
+        problems.append("click did not stage a pending stone")
+    if "hidden" in (stg.get("panel") or ""):
+        problems.append("place panel hidden after staging")
+    if (stg.get("coord") or "").strip() != "Q16":
+        problems.append("place panel coordinate mismatch")
+    cf = confirmed or {}
+    if cf.get("pending") is not None:
+        problems.append("pending stone not cleared after placebo")
+    if not cf.get("hasQ16") or (cf.get("moves") or 0) < 1:
+        problems.append("confirmed placement did not reach the engine")
+    kd = kdb or {}
+    if (kd.get("items") or 0) < 10 or (kd.get("cats") or 0) < 5:
+        problems.append("kifu DB list/categories missing")
+    kdd = kdb_detail or {}
+    if (kdd.get("stones") or 0) < 4:
+        problems.append("kifu diagram stones missing")
+    if (kdd.get("demo") or 0) < 4:
+        problems.append("kifu demo not overlaid on board")
     report("gate", {"ok": not problems, "problems": problems})
 
     report("errors", errors[:20])

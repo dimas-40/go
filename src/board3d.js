@@ -371,14 +371,119 @@ export function createBoard3D(scene, opts = {}) {
     }),
   };
   const ghostStones = [];
+  const ghostLabels = [];
   for (let i = 0; i < 6; i++) {
     const m = new THREE.Mesh(stoneGeo, ghostMats[BLACK]);
-    m.scale.set(STONE_R * 0.92, STONE_R * 0.92, STONE_R * 0.32);
+    m.scale.set(STONE_R, STONE_R, STONE_R * 0.335);
     m.visible = false;
     m.castShadow = false;
     root.add(m);
     ghostStones.push(m);
+
+    // 착수 형태 — 판 위에 앉은 미래의 돌 위에 수순 번호를 새긴다.
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 128;
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+      opacity: 0.95,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(STONE_R * 0.86, STONE_R * 0.86, 1);
+    sprite.visible = false;
+    sprite.renderOrder = 12;
+    root.add(sprite);
+    ghostLabels.push({ canvas, ctx: canvas.getContext("2d"), tex, mat, sprite, text: "", tone: "" });
   }
+
+  // 미래 수순을 잇는 금빛 실 — 판 위에서 그래프가 '착수'로 읽힌다.
+  const ghostPathMat = new THREE.LineBasicMaterial({
+    color: 0xf0d6a4,
+    transparent: true,
+    opacity: 0.52,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const ghostPathGeo = new THREE.BufferGeometry();
+  const ghostPath = new THREE.Line(ghostPathGeo, ghostPathMat);
+  ghostPath.renderOrder = 10;
+  ghostPath.visible = false;
+  root.add(ghostPath);
+
+  const candidateRing = new THREE.Mesh(
+    new THREE.TorusGeometry(STONE_R * 1.16, 0.62, 10, 64),
+    new THREE.MeshStandardMaterial({
+      color: 0x9fffe8,
+      emissive: 0x2bd6b0,
+      emissiveIntensity: 1.2,
+      roughness: 0.28,
+      metalness: 0.2,
+      transparent: true,
+      opacity: 0.86,
+    }),
+  );
+  candidateRing.visible = false;
+  root.add(candidateRing);
+
+  // '착수' 버튼을 누르기 전, 고른 자리에 미리 앉혀 보는 돌.
+  const pendingMats = {
+    [BLACK]: new THREE.MeshPhysicalMaterial({
+      color: 0x10141b,
+      roughness: 0.28,
+      metalness: 0.1,
+      clearcoat: 1,
+      clearcoatRoughness: 0.18,
+      transparent: true,
+      opacity: 0.78,
+      emissive: 0x1d6f61,
+      emissiveIntensity: 0.22,
+    }),
+    [WHITE]: new THREE.MeshPhysicalMaterial({
+      color: 0xf4ecdb,
+      roughness: 0.3,
+      metalness: 0.0,
+      clearcoat: 1,
+      clearcoatRoughness: 0.22,
+      transparent: true,
+      opacity: 0.78,
+      emissive: 0x7d5a20,
+      emissiveIntensity: 0.18,
+    }),
+  };
+  const pendingStone = new THREE.Mesh(stoneGeo, pendingMats[BLACK]);
+  pendingStone.scale.set(STONE_R, STONE_R, STONE_R * 0.335);
+  pendingStone.visible = false;
+  pendingStone.castShadow = false;
+  root.add(pendingStone);
+
+  // 전시장 먼지 — 조명 사이로 천천히 떠다니는 미립자. 타이틀의 3D 깊이를 만든다.
+  const dustCount = 420;
+  const dustGeo = new THREE.BufferGeometry();
+  const dustPos = new Float32Array(dustCount * 3);
+  for (let i = 0; i < dustCount; i++) {
+    dustPos[i * 3] = (Math.random() - 0.5) * 1100;
+    dustPos[i * 3 + 1] = (Math.random() - 0.5) * 900;
+    dustPos[i * 3 + 2] = Math.random() * 620 - 80;
+  }
+  dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+  const dustMat = new THREE.PointsMaterial({
+    color: 0xffe3b0,
+    size: 2.4,
+    transparent: true,
+    opacity: 0.32,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    sizeAttenuation: true,
+    toneMapped: false,
+  });
+  const dust = new THREE.Points(dustGeo, dustMat);
+  dust.renderOrder = 3;
+  root.add(dust);
 
   let size = 0;
   let boardW = 0;
@@ -395,6 +500,7 @@ export function createBoard3D(scene, opts = {}) {
   let selectedIdx = null;
   let ghostLine = [];
   let ghostCandidate = null;
+  let pendingMove = null;
 
   function halfFor(s) {
     // 실제 바둑판처럼 격자 밖 여백은 한두 칸. 나무 결이 보일 만큼만 남긴다.
@@ -641,24 +747,85 @@ export function createBoard3D(scene, opts = {}) {
       selectRing.position.set(worldX(selectedIdx, size), worldY(selectedIdx, size), GRID_Z + 0.32);
     }
 
-    // 미래 세 수: 반투명 돌 + 후보 고리
-    ghostLine = Array.isArray(data.future?.line) ? data.future.line : [];
-    ghostCandidate = Number.isInteger(data.future?.candidate) ? data.future.candidate : null;
+    // 미래 시뮬레이션 / 기보 도해: 반투명 돌을 '착수 형태'로 판 위에 앉힌다.
+    const futureLine = Array.isArray(data.future?.line) ? data.future.line : [];
+    const demoLine = Array.isArray(data.kifuDemo?.line) ? data.kifuDemo.line : [];
+    ghostLine = futureLine.length ? futureLine : demoLine;
+    ghostCandidate = Number.isInteger(data.future?.candidate)
+      ? data.future.candidate
+      : (futureLine.length ? null : (ghostLine[0]?.idx ?? null));
     ghostStones.forEach((m, i) => {
       const mv = ghostLine[i];
       if (!mv) {
         m.visible = false;
+        const lab = ghostLabels[i];
+        if (lab) lab.sprite.visible = false;
         return;
       }
       m.visible = true;
       const candidate = mv.idx === ghostCandidate;
       m.material = candidate ? ghostMats.candidate : ghostMats[mv.color === BLACK ? BLACK : WHITE];
-      const lift = 1.5 + i * 0.85;
-      m.position.set(worldX(mv.idx, size), worldY(mv.idx, size), STONE_Z + lift);
-      const sc = candidate ? 1.05 : 0.9;
-      m.scale.set(STONE_R * sc, STONE_R * sc, STONE_R * 0.32);
-      m.userData.baseZ = STONE_Z + lift;
+      m.position.set(worldX(mv.idx, size), worldY(mv.idx, size), STONE_Z);
+      m.scale.set(STONE_R, STONE_R, STONE_R * 0.335);
+      m.userData.baseZ = STONE_Z;
+
+      const lab = ghostLabels[i];
+      if (lab) {
+        lab.sprite.visible = true;
+        lab.sprite.position.set(worldX(mv.idx, size), worldY(mv.idx, size), STONE_Z + STONE_R * 0.335 + 1.7);
+        const text = String(mv.n ?? i + 1);
+        const tone = `${mv.color}-${candidate}`;
+        if (lab.text !== text || lab.tone !== tone) {
+          lab.text = text;
+          lab.tone = tone;
+          const c = lab.ctx;
+          const S = lab.canvas.width;
+          c.clearRect(0, 0, S, S);
+          c.beginPath();
+          c.arc(S / 2, S / 2, S * 0.39, 0, Math.PI * 2);
+          c.fillStyle = candidate ? "rgba(12, 44, 38, 0.88)" : "rgba(8, 10, 13, 0.72)";
+          c.fill();
+          c.lineWidth = 5;
+          c.strokeStyle = candidate ? "rgba(120, 255, 224, 0.95)" : "rgba(240, 214, 164, 0.72)";
+          c.stroke();
+          c.font = `700 ${Math.round(S * 0.46)}px "SFMono-Regular", "Roboto Mono", monospace`;
+          c.textAlign = "center";
+          c.textBaseline = "middle";
+          c.fillStyle = candidate ? "#b9ffed" : (mv.color === WHITE ? "#3a2a13" : "#ffe9bd");
+          c.fillText(text, S / 2, S / 2 + S * 0.02);
+          lab.tex.needsUpdate = true;
+        }
+        lab.sprite.scale.setScalar(candidate ? STONE_R * 0.98 : STONE_R * 0.84);
+      }
     });
+
+    // 수순을 잇는 금빛 실. 2수 이상일 때만.
+    const pts = ghostLine.slice(0, ghostStones.length).map((mv) =>
+      new THREE.Vector3(worldX(mv.idx, size), worldY(mv.idx, size), STONE_Z + STONE_R * 0.34 + 0.05));
+    if (pts.length >= 2) {
+      ghostPathGeo.setFromPoints(pts);
+      ghostPath.visible = true;
+    } else {
+      ghostPath.visible = false;
+    }
+
+    // 첫 수(후보) 둘레의 옥빛 고리.
+    candidateRing.visible = Number.isInteger(ghostCandidate);
+    if (candidateRing.visible) {
+      candidateRing.position.set(
+        worldX(ghostCandidate, size),
+        worldY(ghostCandidate, size),
+        STONE_Z + STONE_R * 0.32 + 0.1,
+      );
+    }
+
+    // 착수 대기석 — 버튼을 누르기 전 고른 자리에 앉힌다.
+    pendingMove = data.pending && Number.isInteger(data.pending.idx) ? data.pending : null;
+    pendingStone.visible = !!pendingMove;
+    if (pendingMove) {
+      pendingStone.material = pendingMats[pendingMove.color === WHITE ? WHITE : BLACK];
+      pendingStone.position.set(worldX(pendingMove.idx, size), worldY(pendingMove.idx, size), STONE_Z);
+    }
   }
 
   let t0 = 0;
@@ -674,10 +841,30 @@ export function createBoard3D(scene, opts = {}) {
       selectRing.rotation.z = -t * 0.45;
       selectRing.scale.setScalar(1 + Math.sin(t * 3) * 0.02);
     }
-    for (const m of ghostStones) {
-      if (!m.visible) continue;
-      const base = m.userData.baseZ || 4;
-      m.position.z = base + Math.sin(t * 2.6 + m.position.x * 0.01) * 0.55;
+    // 미래의 돌은 뜨지 않는다. 판에 닿은 채, 번호만 숨 쉰다.
+    for (let i = 0; i < ghostStones.length; i++) {
+      const lab = ghostLabels[i];
+      if (!lab?.sprite.visible) continue;
+      const s = (ghostStones[i].material === ghostMats.candidate ? 0.98 : 0.84)
+        * (1 + Math.sin(t * 2.4 + i * 0.9) * 0.025);
+      lab.sprite.scale.setScalar(STONE_R * s);
+    }
+    if (candidateRing.visible) {
+      candidateRing.rotation.z = t * 0.7;
+      candidateRing.scale.setScalar(1 + Math.sin(t * 3.2) * 0.035);
+    }
+    if (pendingStone.visible) {
+      pendingStone.position.z = STONE_Z + Math.sin(t * 5.2) * 0.08;
+    }
+    // 먼지: 아주 느리게 위로 흐르고, 천장에 닿으면 아래에서 다시 올라온다.
+    if (dust.visible) {
+      const arr = dustGeo.attributes.position.array;
+      for (let i = 0; i < dustCount; i++) {
+        arr[i * 3 + 1] += dt * 4.2 * (0.4 + ((i * 37) % 100) / 180);
+        arr[i * 3] += Math.sin(t * 0.12 + i) * 0.05;
+        if (arr[i * 3 + 1] > 420) arr[i * 3 + 1] = -460;
+      }
+      dustGeo.attributes.position.needsUpdate = true;
     }
   }
 
@@ -707,6 +894,14 @@ export function createBoard3D(scene, opts = {}) {
     dotMat.dispose();
     selectMat.dispose();
     Object.values(ghostMats).forEach((m) => m.dispose());
+    Object.values(pendingMats).forEach((m) => m.dispose());
+    candidateRing.geometry?.dispose?.();
+    candidateRing.material?.dispose?.();
+    ghostPathGeo.dispose?.();
+    ghostPathMat.dispose?.();
+    ghostLabels.forEach((l) => { l.tex.dispose?.(); l.mat.dispose?.(); });
+    dustGeo.dispose?.();
+    dustMat.dispose?.();
   }
 
   // 초기 크기

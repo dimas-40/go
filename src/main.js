@@ -18,6 +18,13 @@ import { createInfluence } from "./gpu-influence.js";
 import { createBoard3D } from "./board3d.js";
 import { drawKifu, drawScenario } from "./kifu.js";
 import {
+  KIFU_CATEGORIES,
+  KIFU_DB,
+  coordToIndex as dbCoordIndex,
+  drawKifuBoard,
+  recordById,
+} from "./kifu-db.js";
+import {
   ALL_SCENES,
   CHAPTERS,
   createSceneEngine,
@@ -28,12 +35,22 @@ import {
   sceneById,
 } from "./story.js";
 import {
+  cancelSound,
   captureSound,
   futureSound,
   ghostSound,
   initAudio,
+  listenKorean,
+  listenSupported,
   loseSound,
+  placeSound,
+  selectSound,
+  setVoiceEnabled,
+  speak,
+  speechSupported,
   stoneSound,
+  uiSound,
+  voiceEnabled,
   winSound,
 } from "./audio.js";
 
@@ -121,6 +138,16 @@ const els = {
   askBtn: $("askBtn"),
   futureBtn: $("futureBtn"),
   titleBtn: $("titleBtn"),
+  voiceToggleBtn: $("voiceToggleBtn"),
+  micBtn: $("micBtn"),
+  placePanel: $("placePanel"),
+  placeStone: $("placeStone"),
+  placeCoord: $("placeCoord"),
+  placeConfirmBtn: $("placeConfirmBtn"),
+  placeCancelBtn: $("placeCancelBtn"),
+  kifuDbCats: $("kifuDbCats"),
+  kifuDbList: $("kifuDbList"),
+  kifuDbDetail: $("kifuDbDetail"),
   storyHud: $("storyHud"),
   storyChapter: $("storyChapter"),
   storyGoal: $("storyGoal"),
@@ -206,6 +233,13 @@ const state = {
   liveCandidateKey: "",
   thinkingCandidates: [],
   ghostLine: [],
+  pending: null,
+  kifuDemo: null,
+  kifuRecordId: null,
+  kifuDbCat: "all",
+  voiceOn: true,
+  micRec: null,
+  micActive: false,
 };
 
 const COLOR_NAME = { 1: "흑", 2: "백", 0: "무승부" };
@@ -332,6 +366,8 @@ function resetTransient() {
   state.liveCandidateKey = "";
   state.thinkingCandidates = [];
   state.ghostLine = [];
+  state.pending = null;
+  state.kifuDemo = null;
   clearFuture(false);
   state.futureMode = false;
   document.body.classList.remove("future-mode");
@@ -366,7 +402,14 @@ function startTitle() {
   setShowcase(false);
   applyViewMode("board", { force: true, fit: false });
   fitTitleBoard(900);
+  // 타이틀은 살아 있는 전시장 — 카메라가 아주 천천히 숨을 쉰다.
+  const tc = state.graph?.controls?.();
+  if (tc) {
+    tc.autoRotate = true;
+    tc.autoRotateSpeed = 0.18;
+  }
   renderScenario();
+  renderKifuDb();
 }
 
 function startFreeMode() {
@@ -386,8 +429,11 @@ function startFreeMode() {
   newGame();
   applyViewMode("overlay", { fit: false });
   setRightTab("onto");
+  const fc = state.graph?.controls?.();
+  if (fc) fc.autoRotate = false;
   renderScenario();
-  showToast("자유 대국입니다. 좌하단 '묻는다'로 힌트를 들어 보세요.");
+  renderKifuDb();
+  showToast("자유 대국입니다. 자리를 고른 뒤 '착수'를 누르세요.");
 }
 
 function loadStoryScene(scene) {
@@ -427,6 +473,8 @@ function loadStoryScene(scene) {
   updateUI();
   applyViewMode("overlay", { fit: false });
   fitBoard(820);
+  const sc = state.graph?.controls?.();
+  if (sc) sc.autoRotate = false;
   state.scenarioOpen = true;
   renderScenario();
   ghostQueue(scene.intro || []);
@@ -453,6 +501,8 @@ function ghostNext() {
   els.ghostPanel.classList.remove("hidden");
   els.ghostNextBtn.classList.toggle("hidden", state.ghostQueue.length === 0);
   ghostSound();
+  // 귀신의 목소리. 음성 토글이 켜져 있으면 대사와 동시에 읽는다.
+  speak(line);
   clearInterval(state.ghostTimer);
   state.ghostTyping++;
   const token = state.ghostTyping;
@@ -477,6 +527,173 @@ function ghostClose() {
   clearInterval(state.ghostTimer);
   state.ghostQueue = [];
   els.ghostPanel.classList.add("hidden");
+}
+
+// ── 음성: 귀신의 목소리(TTS) · 말로 두기(STT) ───────────────────
+const SPEECH_LETTERS = {
+  에이: "A", 비: "B", 씨: "C", 디: "D", 이: "E", 에프: "F", 지: "G",
+  에이치: "H", 제이: "J", 케이: "K", 엘: "L", 엠: "M", 엔: "N", 오: "O",
+  피: "P", 큐: "Q", 알: "R", 에스: "S", 티: "T",
+};
+const SPEECH_NUMBERS = {
+  십구: 19, 십팔: 18, 십칠: 17, 십육: 16, 십오: 15, 십사: 14, 십삼: 13,
+  십이: 12, 십일: 11, 십: 10, 구: 9, 팔: 8, 칠: 7, 육: 6, 오: 5, 사: 4,
+  삼: 3, 이: 2, 일: 1,
+};
+
+function spokenLetter(tok) {
+  if (/^[A-HJ-T]$/.test(tok)) return tok;
+  return SPEECH_LETTERS[tok] || null;
+}
+
+function spokenNumber(tok) {
+  if (/^\d{1,2}$/.test(tok)) return Number(tok);
+  return SPEECH_NUMBERS[tok] ?? null;
+}
+
+function spokenCoord(letter, num) {
+  if (!letter || !num) return null;
+  const coord = `${letter}${num}`;
+  const idx = coordIndex(coord, state.engine.size);
+  return idx >= 0 ? { idx, coord } : null;
+}
+
+// "디 십육", "디사", "D16", "오 오"(O5)를 모두 읽는다.
+// '이'(E/2), '오'(O/5)처럼 글자와 숫자가 겹치는 말은 자리(앞=글자, 뒤=숫자)로 가른다.
+function parseSpokenCoord(text) {
+  const tokens = String(text || "")
+    .toUpperCase()
+    .replace(/[.,!?~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+  if (!tokens.length) return null;
+
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const hit = spokenCoord(spokenLetter(tokens[i]), spokenNumber(tokens[i + 1]));
+    if (hit) return hit;
+  }
+
+  const letters = Object.entries(SPEECH_LETTERS).sort((a, b) => b[0].length - a[0].length);
+  for (const tok of tokens) {
+    for (const [k, v] of letters) {
+      if (!tok.startsWith(k)) continue;
+      const hit = spokenCoord(v, spokenNumber(tok.slice(k.length)));
+      if (hit) return hit;
+    }
+    const m = /^([A-HJ-T])(\d{1,2})$/.exec(tok);
+    if (m) {
+      const hit = spokenCoord(m[1], Number(m[2]));
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+function updateVoiceButtons() {
+  if (els.voiceToggleBtn) {
+    els.voiceToggleBtn.textContent = state.voiceOn ? "음성 ON" : "음성 OFF";
+    els.voiceToggleBtn.setAttribute("aria-pressed", state.voiceOn ? "true" : "false");
+    els.voiceToggleBtn.title = speechSupported()
+      ? "귀신의 대사를 한국어 음성으로 읽습니다."
+      : "이 브라우저에는 음성 합성이 없습니다.";
+  }
+  if (els.micBtn) {
+    els.micBtn.setAttribute("aria-pressed", state.micActive ? "true" : "false");
+    els.micBtn.textContent = state.micActive ? "듣는 중…" : "말하기";
+    els.micBtn.title = listenSupported()
+      ? "말로 두기 — '디 사', '착수', '패스', '무르기'"
+      : "이 브라우저는 음성 인식을 지원하지 않습니다.";
+  }
+}
+
+function toggleVoice() {
+  state.voiceOn = !state.voiceOn;
+  setVoiceEnabled(state.voiceOn);
+  updateVoiceButtons();
+  if (state.voiceOn) speak("귀신의 목소리를 켰습니다.");
+  else showToast("귀신의 목소리를 껐습니다.");
+}
+
+function handleVoiceCommand(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return;
+  const t = raw.replace(/\s+/g, "");
+  showToast(`들은 말 · ${raw}`);
+  if (/착수|놓아|둬|두어/.test(t)) {
+    if (state.pending) confirmPending();
+    else if (!isHumanTurn()) showToast("지금은 내 차례가 아닙니다.", true);
+    else showToast("먼저 판에서 자리를 고르세요.", true);
+    return;
+  }
+  if (/패스/.test(t)) {
+    passTurn();
+    return;
+  }
+  if (/무르기|되돌/.test(t)) {
+    undoMove();
+    return;
+  }
+  if (/힌트|귀신|도와/.test(t)) {
+    askHint();
+    return;
+  }
+  if (/취소|지워|없애/.test(t)) {
+    cancelSound();
+    clearSelection();
+    return;
+  }
+  if (/새대국|새로|리셋/.test(t)) {
+    newGame();
+    return;
+  }
+  const coord = parseSpokenCoord(raw);
+  if (coord) {
+    if (!isHumanTurn()) {
+      showToast("지금은 내 차례가 아닙니다.", true);
+      return;
+    }
+    selectEmpty(coord.idx);
+    speak(`${coord.coord} 자리입니다. 착수라고 말하거나 착수 버튼을 누르세요.`);
+    return;
+  }
+  showToast("알아듣지 못했습니다. '디 사', '착수', '패스'처럼 말해 주세요.", true);
+}
+
+function startMic() {
+  if (!listenSupported()) {
+    showToast("이 브라우저는 음성 인식을 지원하지 않습니다. Chrome에서 열어 주세요.", true);
+    return;
+  }
+  if (state.micActive) {
+    state.micRec?.stop?.();
+    return;
+  }
+  initAudio();
+  state.micActive = true;
+  updateVoiceButtons();
+  showToast("듣고 있습니다 — '디 사' → '착수'");
+  state.micRec = listenKorean({
+    onResult: (text) => {
+      state.micRec = null;
+      handleVoiceCommand(text);
+    },
+    onError: (err) => {
+      state.micActive = false;
+      updateVoiceButtons();
+      showToast(`음성 인식 오류 · ${err}`, true);
+    },
+    onEnd: () => {
+      state.micActive = false;
+      state.micRec = null;
+      updateVoiceButtons();
+    },
+  });
+  if (!state.micRec) {
+    state.micActive = false;
+    updateVoiceButtons();
+  }
 }
 
 function buildGhostLine(max = 3) {
@@ -675,7 +892,7 @@ function confirmFuture() {
   if (!state.future) return;
   const idx = state.future.candidate;
   setFutureMode(false);
-  playHuman(idx);
+  playHuman(idx, { confirmed: true });
 }
 
 function fmtBytes(n) {
@@ -706,6 +923,12 @@ function aiColor() {
   return opponent(state.humanColor);
 }
 
+function panForIdx(idx) {
+  const size = state.engine.size;
+  const x = idx % size;
+  return ((x / Math.max(1, size - 1)) * 2 - 1) * 0.45;
+}
+
 function syncBoard3D() {
   if (!state.board3d) return;
   const e = state.engine;
@@ -714,7 +937,9 @@ function syncBoard3D() {
     size: e.size,
     lastMove: e.lastMove,
     selected: state.selected?.idx ?? null,
+    pending: state.pending,
     future: state.future,
+    kifuDemo: state.kifuDemo,
     showcase: state.titleVisible ? TITLE_SHOWCASE : null,
     showcaseLast: state.titleVisible ? TITLE_SHOWCASE_LAST : null,
   });
@@ -1112,6 +1337,92 @@ function renderScenario() {
   }
 }
 
+// ── 기보 데이터베이스 — 온톨로지 분류 · 판 위 도해 ─────────────────
+function renderKifuDb() {
+  if (!els.kifuDbList) return;
+  const cat = state.kifuDbCat || "all";
+  if (els.kifuDbCats) {
+    els.kifuDbCats.innerHTML = KIFU_CATEGORIES.map((c) => {
+      const n = c.id === "all" ? KIFU_DB.length : KIFU_DB.filter((r) => r.category === c.id).length;
+      return `<button type="button" class="kdb-cat ${c.id === cat ? "is-on" : ""}" data-cat="${c.id}">${c.label}<span>${n}</span></button>`;
+    }).join("");
+  }
+  const records = cat === "all" ? KIFU_DB : KIFU_DB.filter((r) => r.category === cat);
+  els.kifuDbList.innerHTML = records.map((r) => {
+    const catLabel = KIFU_CATEGORIES.find((c) => c.id === r.category)?.label || r.category;
+    return `<button type="button" class="kdb-item ${r.id === state.kifuRecordId ? "is-on" : ""}" data-record="${r.id}">` +
+      `<span class="kdb-cat-tag">${catLabel}</span>` +
+      `<b>${r.title}</b>` +
+      `<em>${r.concepts.slice(0, 3).join(" · ")}</em>` +
+      `</button>`;
+  }).join("") || `<p class="muted">기록이 없습니다.</p>`;
+
+  const rec = recordById(state.kifuRecordId);
+  if (!els.kifuDbDetail) return;
+  if (!rec) {
+    els.kifuDbDetail.className = "kdb-detail muted";
+    els.kifuDbDetail.textContent = "기보를 고르면 판 위에 착수 형태로 겹쳐 보여 줍니다.";
+    return;
+  }
+  els.kifuDbDetail.className = "kdb-detail";
+  els.kifuDbDetail.innerHTML =
+    `<div class="kdb-preview"></div>` +
+    `<div class="kdb-info">` +
+      `<b>${rec.title}</b><span>${rec.subtitle}</span>` +
+      `<div class="kdb-tags">${rec.concepts.map((c) => `<i>${c}</i>`).join("")}</div>` +
+      `<p>${rec.note}</p>` +
+      `<div class="kdb-rel">${rec.relations.map((r) => `<em>${r.from} → ${r.to} <small>${r.rel}</small></em>`).join("")}</div>` +
+      `<div class="kdb-actions"><button id="kifuDemoBtn" class="btn small primary" type="button">판에 겹쳐 보기</button>` +
+      `<button id="kifuDemoClearBtn" class="btn small" type="button">도해 지우기</button></div>` +
+    `</div>`;
+  const host = els.kifuDbDetail.querySelector(".kdb-preview");
+  if (host) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "kdb-board");
+    host.append(svg);
+    drawKifuBoard(svg, rec, 19);
+  }
+  els.kifuDbDetail.querySelector("#kifuDemoBtn")?.addEventListener("click", () => previewKifuRecord(rec.id));
+  els.kifuDbDetail.querySelector("#kifuDemoClearBtn")?.addEventListener("click", () => clearKifuDemo());
+}
+
+function previewKifuRecord(id) {
+  const rec = recordById(id);
+  if (!rec) return;
+  state.kifuRecordId = id;
+  if (state.engine.size !== 19) {
+    state.kifuDemo = null;
+    syncBoard3D();
+    renderKifuDb();
+    showToast("이 도해는 19줄 판에서 겹쳐 볼 수 있습니다.", true);
+    return;
+  }
+  const line = rec.moves.slice(0, 6).map((mv, i) => ({
+    idx: dbCoordIndex(mv.coord, 19),
+    coord: mv.coord,
+    color: mv.color,
+    n: i + 1,
+  })).filter((m) => m.idx >= 0);
+  state.kifuDemo = { recordId: id, title: rec.title, line };
+  state.selected = null;
+  state.pending = null;
+  renderPlacePanel();
+  clearFuture(false);
+  syncBoard3D();
+  renderKifuDb();
+  if (state.graph) state.graph.restyle();
+  if (state.viewMode === "graph") applyViewMode("overlay", { ms: 420 });
+  showToast(`${rec.title} · ${line.length}수를 판 위에 앉혔습니다.`);
+  speak(`${rec.title}. ${rec.subtitle}`);
+}
+
+function clearKifuDemo() {
+  state.kifuDemo = null;
+  syncBoard3D();
+  renderKifuDb();
+  showToast("도해를 지웠습니다.");
+}
+
 function onGraphPanelPick(ev) {
   const g = ev.target.closest?.("[data-idx]");
   if (!g) return;
@@ -1256,14 +1567,27 @@ function selectStone(idx) {
   if (!g) return;
   state.selected = { type: "stone", idx, group: g };
   state.selectedSet = new Set(g.stones);
+  state.pending = null;
+  renderPlacePanel();
   renderGroupFacts();
   syncBoard3D();
   if (state.graph) state.graph.restyle();
 }
 
+// 빈 교점을 고르면 곧바로 두지 않는다. 그 자리에 돌을 앉혀 보여 주고,
+// '착수' 버튼을 눌렀을 때 돌소리와 함께 실제로 둔다. 다른 바둑 앱의 결.
 function selectEmpty(idx) {
   state.selected = { type: "empty", idx };
   state.selectedSet = new Set([idx]);
+  const e = state.engine;
+  const canStage = !isGameOver() && isHumanTurn() && e.board[idx] === EMPTY
+    && !state.futureMode && e.isLegal(idx, { fast: false });
+  state.pending = canStage ? { idx, color: e.turn } : null;
+  if (canStage) {
+    state.kifuDemo = null;
+    selectSound(panForIdx(idx));
+  }
+  renderPlacePanel();
   renderGroupFacts();
   syncBoard3D();
   if (state.graph) state.graph.restyle();
@@ -1272,12 +1596,41 @@ function selectEmpty(idx) {
 function clearSelection() {
   state.selected = null;
   state.selectedSet = new Set();
+  state.pending = null;
+  renderPlacePanel();
   renderGroupFacts();
   syncBoard3D();
   if (state.graph) state.graph.restyle();
 }
 
-function logPlay(res) {
+function renderPlacePanel() {
+  if (!els.placePanel) return;
+  const p = state.pending;
+  els.placePanel.classList.toggle("hidden", !p);
+  if (!p) return;
+  if (els.placeCoord) els.placeCoord.textContent = coordName(p.idx, state.engine.size);
+  if (els.placeStone) {
+    els.placeStone.classList.toggle("black", p.color === BLACK);
+    els.placeStone.classList.toggle("white", p.color === WHITE);
+  }
+  const who = p.color === BLACK ? "흑" : "백";
+  els.placeCoord?.setAttribute("title", `${who} ${coordName(p.idx, state.engine.size)}`);
+}
+
+function confirmPending() {
+  const p = state.pending;
+  if (!p) return;
+  if (!isHumanTurn()) {
+    showToast("지금은 내 차례가 아닙니다.", true);
+    return;
+  }
+  const idx = p.idx;
+  state.pending = null;
+  renderPlacePanel();
+  playHuman(idx, { confirmed: true });
+}
+
+function logPlay(res, silent = false) {
   state.moveLog.push({
     number: res.moveNumber,
     color: res.color,
@@ -1286,8 +1639,9 @@ function logPlay(res) {
     coord: coordName(res.idx, state.engine.size),
     captured: res.captured.length,
   });
+  if (silent) return;
   if (res.captured.length) captureSound(res.captured.length);
-  else stoneSound();
+  else stoneSound(res.color, panForIdx(res.idx));
 }
 
 function logPass(res) {
@@ -1301,7 +1655,7 @@ function logPass(res) {
   });
 }
 
-function playHuman(idx) {
+function playHuman(idx, opts = {}) {
   const e = state.engine;
   if (isGameOver()) return showToast("대국이 끝났습니다. 새 대국을 누르세요.", true);
   if (state.mode === "ai" && state.aiThinking) return showToast("AI가 생각 중입니다.", true);
@@ -1315,18 +1669,28 @@ function playHuman(idx) {
   state.requestId++;
   state.lastPlayResult = res;
   state.lastPlayWasHuman = true;
+  state.pending = null;
+  state.kifuDemo = null;
+  renderPlacePanel();
   clearFuture(false);
-  logPlay(res);
+  logPlay(res, true);
+  // 실제로 돌이 판에 닿는 순간의 소리. 버튼으로 둔 수는 나무를 한 번 더 두드린다.
+  if (opts.confirmed) placeSound(res.color, panForIdx(idx));
+  else stoneSound(res.color, panForIdx(idx));
+  if (res.captured.length) captureSound(res.captured.length);
   afterMove();
 }
 
 function afterMove() {
   state.selected = null;
   state.selectedSet = new Set();
+  state.pending = null;
   state.ghostLine = [];
   state.thinkingCandidates = [];
   state.liveCandidates = [];
   state.liveCandidateKey = "";
+  state.kifuDemo = null;
+  renderPlacePanel();
   clearFuture(false);
   refreshBoardState();
   const e = state.engine;
@@ -1650,6 +2014,7 @@ function updateUI() {
   renderKifu();
   renderScenario();
   renderGpuFacts();
+  renderPlacePanel();
   syncBoard3D();
   if (state.graph) state.graph.restyle();
   if (e.gameOver) renderEndBanner();
@@ -2109,11 +2474,22 @@ async function boot() {
         showToast("AI 차례입니다.", true);
         return;
       }
-      playHuman(ctx.idx);
+      // 자리를 먼저 고른다. 실제 착수는 '착수' 버튼(또는 Enter)에서.
+      if (state.engine.board[ctx.idx] === EMPTY && !state.engine.isLegal(ctx.idx, { fast: false })) {
+        showToast("그 자리에는 둘 수 없습니다.", true);
+        selectEmpty(ctx.idx);
+        return;
+      }
+      selectEmpty(ctx.idx);
+      if (state.pending) showToast(`${coordName(ctx.idx, state.engine.size)} · '착수'를 누르면 돌이 놓입니다.`);
     });
     g.onBackgroundClick(() => {
       clearSelection();
       clearFuture();
+      if (state.kifuDemo) {
+        state.kifuDemo = null;
+        syncBoard3D();
+      }
     });
 
     state.booted = true;
@@ -2148,6 +2524,8 @@ async function boot() {
       startFree: startFreeMode,
       scenes: ALL_SCENES,
       play: (coord) => playHuman(coordIndex(coord, state.engine.size)),
+      stage: (coord) => selectEmpty(coordIndex(coord, state.engine.size)),
+      placePending: confirmPending,
       preview: (coord) => previewFuture(coordIndex(coord, state.engine.size)),
       confirm: confirmFuture,
       futureMode: setFutureMode,
@@ -2172,6 +2550,29 @@ async function boot() {
 
 // ── UI 이벤트
 els.newGameBtn.addEventListener("click", () => newGame());
+els.placeConfirmBtn?.addEventListener("click", () => {
+  initAudio();
+  confirmPending();
+});
+els.placeCancelBtn?.addEventListener("click", () => {
+  cancelSound();
+  clearSelection();
+});
+els.voiceToggleBtn?.addEventListener("click", () => toggleVoice());
+els.micBtn?.addEventListener("click", () => startMic());
+els.kifuDbCats?.addEventListener("click", (ev) => {
+  const b = ev.target.closest?.("[data-cat]");
+  if (!b) return;
+  state.kifuDbCat = b.dataset.cat;
+  uiSound();
+  renderKifuDb();
+});
+els.kifuDbList?.addEventListener("click", (ev) => {
+  const b = ev.target.closest?.("[data-record]");
+  if (!b) return;
+  uiSound();
+  previewKifuRecord(b.dataset.record);
+});
 els.passBtn.addEventListener("click", () => passTurn());
 els.undoBtn.addEventListener("click", () => undoMove());
 els.resignBtn.addEventListener("click", () => resignGame());
@@ -2256,8 +2657,23 @@ els.scenarioToggleBtn?.addEventListener("click", () => {
   state.scenarioOpen = !state.scenarioOpen;
   renderScenario();
 });
+document.addEventListener("pointerdown", () => initAudio(), { once: true });
+updateVoiceButtons();
 document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && state.pending) {
+    ev.preventDefault();
+    initAudio();
+    confirmPending();
+    return;
+  }
   if (ev.key === "Escape") {
+    if (state.pending) {
+      state.pending = null;
+      cancelSound();
+      renderPlacePanel();
+      syncBoard3D();
+      return;
+    }
     if (state.futureMode) setFutureMode(false);
     else if (!els.ghostPanel.classList.contains("hidden")) ghostClose();
   }
