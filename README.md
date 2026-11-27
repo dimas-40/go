@@ -22,6 +22,10 @@
 - WebGL2 폴백(`?gl=1`)은 영향도용 WebGPU 컴퓨트를 별도 장치로 연다.
 - 실기기(S25 Ultra Adreno 830) 브라우저 실측은 아직 하지 않았습니다.
 
+## 개발 계획
+
+- [AI 바둑 엔진 개발 계획서](docs/DEVELOPMENT-PLAN_Claude.md)
+
 ## 실행
 
 ```bash
