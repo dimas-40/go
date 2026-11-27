@@ -217,6 +217,17 @@ export async function createGraph(container, data, opts = {}) {
     d3ReheatSimulation() { targets(); U.alpha.value = 1; return G; },
     numDimensions(d) { U.flat.value = d === 2 ? 0.6 : 0; U.alpha.value = 1; return G; },
     fire(n) { if (GPU) U.kick.value = n.__i; else kickCPU = n.__i; return G; },
+    // 겹침 모드에서 온톨로지가 나무 판·돌 위에 홀로그램처럼 얹히게 한다.
+    // 깊이 테스트를 끄면 불투명 3D 돌이 투명 그래프를 가리지 않는다.
+    setDepthTest(on) {
+      const v = !!on;
+      nm.depthTest = !v; lm.depthTest = !v;
+      if (nm.needsUpdate !== undefined) nm.needsUpdate = true;
+      if (lm.needsUpdate !== undefined) lm.needsUpdate = true;
+      sprites.renderOrder = v ? 12 : 0;
+      lines.renderOrder = v ? 11 : 0;
+      return G;
+    },
     restyle() { restyle(); return G; },
     async snapshot() { post ? post.render() : renderer.render(scene, camera); return await new Promise((res) => renderer.domElement.toBlob(res)); },
     stats() { let objs = 0; scene.traverse(() => objs++); return { backend: G.backend, fps, nodes: N, links: E, objects: objs, geometries: renderer.info.memory?.geometries, textures: renderer.info.memory?.textures, calls: renderer.info.render?.drawCalls ?? renderer.info.render?.calls, timestamp: !!opts.trackTimestamp }; },

@@ -7,7 +7,7 @@
   <meta name="description" content="귀신 선생과 함께 두는 3D 바둑. WebGPU 온톨로지 그래프, 미래 시뮬레이션, 정석·활로·연결 레슨.">
   <meta name="theme-color" content="#05070a">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23070b10'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%232bd6b0' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23e0b070'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./styles.css?v=20261127i">
+  <link rel="stylesheet" href="./styles.css?v=20261127k">
   <script type="importmap">
     {
       "imports": {
@@ -132,6 +132,18 @@
         <svg id="boardOverlay" class="board-overlay" aria-hidden="true"></svg>
         <div class="board-frame" aria-hidden="true"></div>
         <div id="boardStatus" class="board-status">호선 · 19줄 · 0수</div>
+        <div class="stage-rail" role="group" aria-label="그래프 보기">
+          <button class="stage-btn" type="button" data-view="board">판</button>
+          <button class="stage-btn is-on" type="button" data-view="overlay">겹침</button>
+          <button class="stage-btn" type="button" data-view="graph">그래프</button>
+          <span class="stage-sep" aria-hidden="true"></span>
+          <button id="kifuToggleBtn" class="stage-btn" type="button" aria-pressed="false">기보</button>
+          <button id="focusBtn" class="stage-btn" type="button" aria-pressed="false">몰입</button>
+        </div>
+        <div id="kifuFloatPanel" class="kifu-float hidden" aria-label="기보 그래프">
+          <div class="kifu-float-head"><span>기보 · 온톨로지</span><b id="kifuFloatStatus"></b></div>
+          <svg id="kifuFloat" class="kifu-svg" role="img" aria-label="수순 기보 그래프"></svg>
+        </div>
         <div class="match-hud" id="matchHud" aria-hidden="true">
           <div class="player-plate black" id="blackPlate">
             <span class="p-stone black"></span>
@@ -157,26 +169,42 @@
       </section>
 
       <aside class="panel right">
-        <section class="card">
-          <h2>온톨로지</h2>
-          <div id="ontologyFacts" class="facts"></div>
-        </section>
-        <section class="card">
-          <h2>집단 · 활로</h2>
-          <div id="groupFacts" class="facts muted">돌을 클릭하세요.</div>
-        </section>
-        <section class="card">
-          <h2>AI 후보</h2>
-          <div id="aiFacts" class="facts muted">사람 차례입니다.</div>
-        </section>
-        <section class="card">
-          <h2>대국 기록</h2>
-          <ol id="moveLog" class="moves"></ol>
-        </section>
-        <section class="card">
-          <h2>GPU</h2>
-          <div id="gpuFacts" class="facts"></div>
-        </section>
+        <nav class="right-tabs" aria-label="분석 탭">
+          <button class="right-tab is-on" type="button" data-tab="onto">온톨로지</button>
+          <button class="right-tab" type="button" data-tab="kifu">기보</button>
+          <button class="right-tab" type="button" data-tab="ai">AI</button>
+        </nav>
+        <div class="right-pane is-on" data-pane="onto">
+          <section class="card kifu-card">
+            <h2>기보 · 그래프</h2>
+            <svg id="kifuGraph" class="kifu-svg" role="img" aria-label="수순 기보 그래프"></svg>
+            <div id="kifuStatus" class="kifu-status"></div>
+          </section>
+          <section class="card">
+            <h2>온톨로지</h2>
+            <div id="ontologyFacts" class="facts"></div>
+          </section>
+          <section class="card">
+            <h2>집단 · 활로</h2>
+            <div id="groupFacts" class="facts muted">돌을 클릭하세요.</div>
+          </section>
+        </div>
+        <div class="right-pane" data-pane="kifu">
+          <section class="card">
+            <h2>대국 기록</h2>
+            <ol id="moveLog" class="moves"></ol>
+          </section>
+        </div>
+        <div class="right-pane" data-pane="ai">
+          <section class="card">
+            <h2>AI 후보</h2>
+            <div id="aiFacts" class="facts muted">사람 차례입니다.</div>
+          </section>
+          <section class="card">
+            <h2>GPU</h2>
+            <div id="gpuFacts" class="facts"></div>
+          </section>
+        </div>
       </aside>
     </main>
 
@@ -190,8 +218,18 @@
   <div id="storyHud" class="story-hud hidden">
     <div class="story-chapter" id="storyChapter">제1장 · 빈 판</div>
     <div class="story-goal"><span>목표</span><b id="storyGoal"></b></div>
+    <button id="scenarioToggleBtn" class="chip chip-btn" type="button" aria-pressed="true">정석</button>
     <button id="storyExitBtn" class="chip chip-btn" type="button">나가기</button>
   </div>
+
+  <aside id="scenarioPanel" class="scenario-panel hidden" aria-label="정석 시나리오 그래프">
+    <div class="scenario-head">
+      <span>정석 시나리오 · <b id="scenarioTitle"></b></span>
+      <button id="scenarioCloseBtn" class="scenario-close" type="button" aria-label="닫기">×</button>
+    </div>
+    <svg id="scenarioGraph" class="kifu-svg scenario-svg" role="img" aria-label="티칭 정석 시나리오 그래프"></svg>
+    <div id="scenarioSteps" class="scenario-steps"></div>
+  </aside>
 
   <aside id="ghostPanel" class="ghost-panel hidden" aria-live="polite">
     <div class="ghost-avatar">墨</div>
@@ -245,6 +283,6 @@
     </div>
   </div>
 
-  <script type="module" src="./src/main.js?v=20261127i"></script>
+  <script type="module" src="./src/main.js?v=20261127k"></script>
 </body>
 </html>

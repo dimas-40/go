@@ -16,6 +16,7 @@ import {
 import { loadVulkanDevice, describeLoader } from "./vulkan-loader.js";
 import { createInfluence } from "./gpu-influence.js";
 import { createBoard3D } from "./board3d.js";
+import { drawKifu, drawScenario } from "./kifu.js";
 import {
   ALL_SCENES,
   CHAPTERS,
@@ -88,6 +89,19 @@ const els = {
   aiFacts: $("aiFacts"),
   moveLog: $("moveLog"),
   gpuFacts: $("gpuFacts"),
+  kifuGraph: $("kifuGraph"),
+  kifuFloat: $("kifuFloat"),
+  kifuFloatPanel: $("kifuFloatPanel"),
+  kifuStatus: $("kifuStatus"),
+  kifuFloatStatus: $("kifuFloatStatus"),
+  kifuToggleBtn: $("kifuToggleBtn"),
+  focusBtn: $("focusBtn"),
+  scenarioPanel: $("scenarioPanel"),
+  scenarioTitle: $("scenarioTitle"),
+  scenarioGraph: $("scenarioGraph"),
+  scenarioSteps: $("scenarioSteps"),
+  scenarioCloseBtn: $("scenarioCloseBtn"),
+  scenarioToggleBtn: $("scenarioToggleBtn"),
   graph: $("graph"),
   boardOverlay: $("boardOverlay"),
   boardStatus: $("boardStatus"),
@@ -183,6 +197,15 @@ const state = {
   progress: { completed: [] },
   titleVisible: true,
   modeBeforeStory: "ai",
+  viewMode: "board",
+  focusMode: false,
+  kifuOpen: false,
+  rightTab: "onto",
+  scenarioOpen: true,
+  liveCandidates: [],
+  liveCandidateKey: "",
+  thinkingCandidates: [],
+  ghostLine: [],
 };
 
 const COLOR_NAME = { 1: "흑", 2: "백", 0: "무승부" };
@@ -277,6 +300,7 @@ function clearFuture(restyle = true) {
   els.futurePanel.classList.add("hidden");
   syncBoard3D();
   if (restyle && state.graph) state.graph.restyle();
+  renderKifu();
 }
 
 function setFutureMode(on) {
@@ -304,6 +328,10 @@ function resetTransient() {
   state.influenceInfo = null;
   state.influenceToken++;
   state.territoryOwner = null;
+  state.liveCandidates = [];
+  state.liveCandidateKey = "";
+  state.thinkingCandidates = [];
+  state.ghostLine = [];
   clearFuture(false);
   state.futureMode = false;
   document.body.classList.remove("future-mode");
@@ -336,7 +364,9 @@ function startTitle() {
   refreshBoardState();
   updateUI();
   setShowcase(false);
+  applyViewMode("board", { force: true, fit: false });
   fitTitleBoard(900);
+  renderScenario();
 }
 
 function startFreeMode() {
@@ -354,6 +384,9 @@ function startFreeMode() {
   setShowcase(false);
   clearFuture();
   newGame();
+  applyViewMode("overlay", { fit: false });
+  setRightTab("onto");
+  renderScenario();
   showToast("자유 대국입니다. 좌하단 '묻는다'로 힌트를 들어 보세요.");
 }
 
@@ -392,7 +425,10 @@ function loadStoryScene(scene) {
   setShowcase(false);
   refreshBoardState();
   updateUI();
+  applyViewMode("overlay", { fit: false });
   fitBoard(820);
+  state.scenarioOpen = true;
+  renderScenario();
   ghostQueue(scene.intro || []);
   if (state.influenceOn) refreshInfluence();
 }
@@ -443,17 +479,47 @@ function ghostClose() {
   els.ghostPanel.classList.add("hidden");
 }
 
+function buildGhostLine(max = 3) {
+  const e = state.engine;
+  if (e.gameOver) return [];
+  const sim = e.cloneFast();
+  const rng = makeRng(((Date.now() ^ 0x9e3779b9) ^ (e.moveNumber * 2654435761)) >>> 0);
+  const line = [];
+  for (let p = 0; p < max; p++) {
+    const cands = candidateMoves(sim, rng);
+    let idx = cands.length ? cands[0].stone : null;
+    if (idx === null) {
+      const legal = sim.legalMoves({ fast: true });
+      idx = legal.length ? legal[0] : null;
+    }
+    if (idx === null) break;
+    const color = sim.turn;
+    const r = sim.playFast(idx);
+    if (!r.ok) break;
+    line.push({ idx, color, n: p + 1, coord: coordName(idx, e.size) });
+  }
+  return line;
+}
+
 function askHint() {
   if (!state.story) {
-    const rng = makeRng((Date.now() ^ 0x9e3779b9) >>> 0);
-    const cands = candidateMoves(state.engine, rng);
-    if (cands.length) {
-      const c = cands[0];
-      ghostSpeak(`지금은 ${c.coord || coordName(c.stone, state.engine.size)} 부근이 좋아 보여. 이유는 활로 ${c.liberties}개, 따냄 ${c.captured}개.`);
+    const line = buildGhostLine(3);
+    if (line.length) {
+      state.ghostLine = line;
+      renderKifu();
+      if (state.graph) state.graph.restyle();
+      const c = line[0];
+      ghostSpeak(`지금은 ${c.coord} 부근이 좋아 보여. 기보 그래프에 내가 읽은 세 수를 그려 뒀어.`);
     } else {
       ghostSpeak("지금은 둘 곳이 마땅치 않아. 패스도 한 수야.");
     }
     return;
+  }
+  const goals = scenarioSteps().filter((s) => s.role === "goal" || s.role === "choice");
+  if (goals.length) {
+    state.ghostLine = goals.slice(0, 3).map((s, i) => ({ idx: s.idx, color: s.color, n: i + 1, coord: s.coord }));
+    renderKifu();
+    if (state.graph) state.graph.restyle();
   }
   const hints = state.story.hints || [];
   if (!hints.length) return ghostSpeak("이 장면에는 더 말해 줄 게 없어. 네 직감을 믿어.");
@@ -566,6 +632,7 @@ function previewFuture(idx) {
   state.futureSet = new Map(line.map((m) => [m.idx, m.color]));
   syncBoard3D();
   renderFuturePanel();
+  renderKifu();
   if (state.graph) state.graph.restyle();
   futureSound();
   if (state.influence) {
@@ -687,12 +754,19 @@ function nodeStyle(n) {
   const selected = state.selectedSet.has(idx);
   const last = e.lastMove === idx;
   const atari = state.atariStones.has(idx);
+  const mode = effectiveViewMode();
+  const has3d = !!state.board3d && mode !== "graph";
   const fm = state.future?.line?.find((m) => m.idx === idx);
   if (fm) {
     const ghostBlack = fm.color === BLACK;
     const isCandidate = state.future?.candidate === idx;
-    if (state.board3d) {
-      // 미래 수는 3D 반투명 돌로 그린다. 그래프 노드는 후보만 작게 숨 쉰다.
+    if (has3d) {
+      // 미래 수는 3D 반투명 돌로 그린다. 겹침 모드에서는 온톨로지 링도 함께 보인다.
+      if (mode === "overlay") {
+        return isCandidate
+          ? { color: "#eafff8", alpha: 0.9, size: 11, hot: true }
+          : { color: ghostBlack ? "#7de2ff" : "#ffb7e8", alpha: 0.34, size: 8, hot: false };
+      }
       return isCandidate
         ? { color: "#eafff8", alpha: 0.32, size: 7.5, hot: true }
         : { color: "#7de2ff", alpha: 0, size: 0, hot: false };
@@ -710,9 +784,12 @@ function nodeStyle(n) {
 
   if (stone === BLACK) {
     color = selected ? "#a8d4ff" : last ? "#bfe1ff" : "#4aa8ff";
+    if (mode === "overlay") {
+      return { color, alpha: selected ? 0.65 : atari ? 0.55 : 0.3, size: selected ? 22 : atari ? 24 : last ? 17 : 12.5, hot: atari };
+    }
     alpha = 0.95;
     sizePx = selected ? 21.5 : last ? 20 : 17.5;
-    if (state.board3d) {
+    if (has3d) {
       return atari
         ? { color: "#ff5a5a", alpha: 0.5, size: 27, hot: true }
         : { color, alpha: 0, size: 0, hot: false };
@@ -721,9 +798,12 @@ function nodeStyle(n) {
   }
   if (stone === WHITE) {
     color = selected ? "#ffe9b8" : last ? "#ffe9b8" : "#ffcf6a";
+    if (mode === "overlay") {
+      return { color, alpha: selected ? 0.65 : atari ? 0.55 : 0.3, size: selected ? 22 : atari ? 24 : last ? 17 : 12.5, hot: atari };
+    }
     alpha = 0.95;
     sizePx = selected ? 21.5 : last ? 20 : 17.5;
-    if (state.board3d) {
+    if (has3d) {
       return atari
         ? { color: "#ff5a5a", alpha: 0.5, size: 27, hot: true }
         : { color, alpha: 0, size: 0, hot: false };
@@ -735,8 +815,8 @@ function nodeStyle(n) {
   const star = isStarPoint(size, x, y);
   if (star) {
     color = "#3cb9a6";
-    alpha = 0.38;
-    sizePx = 4.4;
+    alpha = mode === "overlay" ? 0.22 : 0.38;
+    sizePx = mode === "overlay" ? 3 : 4.4;
   }
   const terr = state.territoryOn && state.territoryOwner ? state.territoryOwner[idx] : 0;
   let infShown = false;
@@ -764,20 +844,30 @@ function nodeStyle(n) {
       }
     }
   }
+  // AI·귀신의 후보 — 온톨로지 위에 '생각하는 점'으로 떠오른다.
+  const cand = mode === "board" ? null : candidateAt(idx);
+  if (cand) {
+    const rank = cand.rank ?? 0;
+    color = state.aiThinking ? "#9d7bff" : "#7df5d4";
+    alpha = 0.95 - rank * 0.09;
+    sizePx = 8.5 - rank * 0.85;
+    if (e.ko === idx) color = "#ff4fd8";
+    return { color, alpha, size: sizePx, hot: rank === 0 };
+  }
   if (e.ko === idx) {
     color = "#ff4fd8";
     alpha = 0.95;
     sizePx = 6.6;
-  }
-  if (star && !e.ko && !state.selected) {
-    // 화점은 기본값 유지
   }
   if (selected) {
     color = "#ffffff";
     alpha = 0.95;
     sizePx = 5.6;
   }
-  if (state.board3d && !(selected || e.ko === idx || terr || infShown)) {
+  if (mode === "overlay" && !(selected || e.ko === idx || terr || infShown || star)) {
+    return { color, alpha: 0, size: 0, hot: false };
+  }
+  if (has3d && !(selected || e.ko === idx || terr || infShown || cand)) {
     return { color, alpha: 0, size: 0, hot: false };
   }
   return { color, alpha, size: sizePx, hot: false };
@@ -807,6 +897,8 @@ function nodeLabel(n) {
     const x = idx % size;
     const y = (idx / size) | 0;
     if (isStarPoint(size, x, y)) text += " · 화점";
+    const cand = candidateAt(idx);
+    if (cand) text += ` · <span style='color:#7df5d4'>후보 ${(cand.rank ?? 0) + 1}위 (${cand.score ?? "—"})</span>`;
     if (e.ko === idx) text += " · <span style='color:#ff4fd8'>패</span>";
     const terr = state.territoryOn && state.territoryOwner ? state.territoryOwner[idx] : 0;
     if (terr) text += ` · ${COLOR_NAME[terr]} 집`;
@@ -838,7 +930,15 @@ function linkStyle(l) {
     };
   }
   if ((e.lastMove === a.idx || e.lastMove === b.idx) && aStone + bStone > 0) {
-    return { visible: true, color: "#2bd6b0", alpha: 0.4, width: 0.45, particles: 0 };
+    return { visible: true, color: "#2bd6b0", alpha: 0.5, width: 0.45, particles: 0 };
+  }
+  const mode = effectiveViewMode();
+  if (mode === "overlay") {
+    // 판 위에 격자 온톨로지를 아주 옅게 깐다. 돌집단 선만 실제로 읽힌다.
+    return { visible: true, color: "#1fb9a4", alpha: 0.05, width: 0.08, particles: 0 };
+  }
+  if (mode === "graph") {
+    return { visible: true, color: "#1fb9a4", alpha: aStone || bStone ? 0.26 : 0.16, width: 0.2, particles: 0 };
   }
   if (state.board3d) return { visible: false, color: "#2bd6b0", alpha: 0, width: 0, particles: 0 };
   return { visible: true, color: "#1fb9a4", alpha: 0.3, width: 0.2, particles: 0 };
@@ -849,6 +949,179 @@ function setShowcase(on) {
   if (!c) return;
   c.autoRotate = !!on;
   c.autoRotateSpeed = 0.32;
+}
+
+// ── 보기 모드: 판 / 겹침 / 그래프
+// 겹침(overlay)은 나무 판 위에 온톨로지 링크와 돌 노드를 얹는다.
+// 그래프(graph)는 판을 잠시 숨기고 361노드 온톨로지를 그대로 보여 준다.
+function effectiveViewMode() {
+  if (state.titleVisible) return "board";
+  return state.viewMode || "overlay";
+}
+
+function applyViewMode(mode, opts = {}) {
+  let next = ["board", "overlay", "graph"].includes(mode) ? mode : "overlay";
+  if (state.titleVisible && !opts.force) next = "board";
+  state.viewMode = next;
+  document.body.classList.toggle("view-board", next === "board");
+  document.body.classList.toggle("view-overlay", next === "overlay");
+  document.body.classList.toggle("view-graph", next === "graph");
+  if (state.board3d?.group) state.board3d.group.visible = next !== "graph";
+  if (state.graph?.setDepthTest) state.graph.setDepthTest(next === "overlay");
+  for (const b of document.querySelectorAll(".stage-btn[data-view]")) {
+    b.classList.toggle("is-on", b.dataset.view === next);
+    b.setAttribute("aria-pressed", b.dataset.view === next ? "true" : "false");
+  }
+  if (state.graph) state.graph.restyle();
+  renderKifu();
+  if (opts.fit !== false) {
+    if (next === "graph") fitGraph(opts.ms ?? 700);
+    else fitBoard(opts.ms ?? 700);
+  }
+}
+
+function fitGraph(ms = 700) {
+  if (!state.graph) return;
+  state.graph.resize();
+  state.graph.zoomToFit(ms, 110, (n) => isNodeOnBoard(n, state.engine.size));
+  const c = state.graph.controls?.();
+  if (c) c.autoRotate = false;
+}
+
+function setFocusMode(on) {
+  state.focusMode = !!on;
+  document.body.classList.toggle("focus-mode", state.focusMode);
+  els.focusBtn.setAttribute("aria-pressed", state.focusMode ? "true" : "false");
+  setTimeout(() => {
+    if (effectiveViewMode() === "graph") fitGraph(500);
+    else fitBoard(500);
+  }, 30);
+}
+
+function setKifuOpen(on) {
+  state.kifuOpen = !!on;
+  els.kifuFloatPanel.classList.toggle("hidden", !state.kifuOpen);
+  els.kifuToggleBtn.setAttribute("aria-pressed", state.kifuOpen ? "true" : "false");
+  if (state.kifuOpen) renderKifu();
+}
+
+function setRightTab(name) {
+  state.rightTab = ["onto", "kifu", "ai"].includes(name) ? name : "onto";
+  for (const b of document.querySelectorAll(".right-tab")) b.classList.toggle("is-on", b.dataset.tab === state.rightTab);
+  for (const p of document.querySelectorAll(".right-pane")) p.classList.toggle("is-on", p.dataset.pane === state.rightTab);
+}
+
+function activeCandidates() {
+  if (state.aiThinking && state.thinkingCandidates.length) return state.thinkingCandidates;
+  if (isHumanTurn() && state.liveCandidates.length) return state.liveCandidates;
+  if (Array.isArray(state.lastAI?.candidates) && state.lastAI.candidates.length) return state.lastAI.candidates;
+  return [];
+}
+
+function candidateAt(idx) {
+  const list = activeCandidates();
+  for (let i = 0; i < list.length && i < 5; i++) {
+    if (list[i].idx === idx) return { ...list[i], rank: i };
+  }
+  return null;
+}
+
+function refreshLiveCandidates() {
+  const e = state.engine;
+  if (state.titleVisible || e.gameOver || !isHumanTurn()) {
+    state.liveCandidates = [];
+    state.liveCandidateKey = "";
+    return;
+  }
+  const key = `${e.size}:${e.moveNumber}:${e.turn}:${e.hashes?.[e.hashes.length - 1] ?? 0}`;
+  if (key === state.liveCandidateKey) return;
+  state.liveCandidateKey = key;
+  try {
+    const rng = makeRng((e.moveNumber * 2654435761 ^ 0x1f123bb5) >>> 0);
+    const list = candidateMoves(e, rng).slice(0, 6).map((c, i) => ({
+      idx: c.stone,
+      coord: c.coord || coordName(c.stone, e.size),
+      score: +c.score.toFixed(2),
+      liberties: c.liberties,
+      captured: c.captured,
+      color: e.turn,
+      rank: i,
+    }));
+    state.liveCandidates = list;
+  } catch (err) {
+    state.liveCandidates = [];
+  }
+}
+
+function scenarioSteps() {
+  const scene = state.story;
+  if (!scene) return [];
+  const size = state.engine.size;
+  return (scene.teaching || []).map((t) => ({
+    ...t,
+    idx: coordIndex(t.at, size),
+    coord: t.at,
+  })).filter((t) => t.idx >= 0);
+}
+
+function renderKifu() {
+  if (!els.kifuGraph) return;
+  const opts = {
+    moves: state.moveLog,
+    future: state.future,
+    ghost: state.ghostLine,
+    ai: activeCandidates(),
+    teaching: scenarioSteps().filter((s) => s.role === "goal" || s.role === "choice"),
+    engine: state.engine,
+    size: state.engine.size,
+  };
+  drawKifu(els.kifuGraph, opts);
+  if (state.kifuOpen && els.kifuFloat) drawKifu(els.kifuFloat, opts);
+  const f = state.future?.line?.length ? ` · 미래 ${state.future.line.length}수` : "";
+  const g = state.ghostLine.length ? ` · 귀신 ${state.ghostLine.length}수` : "";
+  const txt = `${state.moveLog.length}수${f}${g}`;
+  if (els.kifuStatus) els.kifuStatus.textContent = txt;
+  if (els.kifuFloatStatus) els.kifuFloatStatus.textContent = txt;
+}
+
+function renderScenario() {
+  if (!els.scenarioPanel) return;
+  const show = !!state.story && state.scenarioOpen;
+  els.scenarioPanel.classList.toggle("hidden", !show);
+  els.scenarioToggleBtn?.setAttribute("aria-pressed", show ? "true" : "false");
+  if (!show) return;
+  const scene = state.story;
+  const steps = scenarioSteps();
+  if (els.scenarioTitle) els.scenarioTitle.textContent = `${scene.no} · ${scene.title}`;
+  drawScenario(els.scenarioGraph, {
+    steps,
+    engine: state.engine,
+    size: state.engine.size,
+    turn: state.engine.turn,
+    moves: state.moveLog,
+  });
+  if (els.scenarioSteps) {
+    const focus = steps.filter((s) => s.role === "goal" || s.role === "choice");
+    els.scenarioSteps.innerHTML = focus.map((s) => {
+      const played = state.moveLog.some((m) => m.coord === s.coord);
+      const onBoard = state.engine.board[s.idx] === s.color;
+      const stateText = played || onBoard ? "이미 둠" : "목표";
+      return `<button type="button" class="scenario-chip ${played || onBoard ? "done" : ""}" data-idx="${s.idx}" data-coord="${s.coord}">` +
+        `<i class="${s.color === WHITE ? "w" : "b"}"></i><b>${s.coord}</b><span>${s.label || stateText}</span></button>`;
+    }).join("");
+  }
+}
+
+function onGraphPanelPick(ev) {
+  const g = ev.target.closest?.("[data-idx]");
+  if (!g) return;
+  const idx = Number(g.dataset.idx);
+  if (!Number.isInteger(idx) || idx < 0) return;
+  if (state.engine.board[idx] !== EMPTY) selectStone(idx);
+  else if (state.futureMode) previewFuture(idx);
+  else selectEmpty(idx);
+  const coord = g.dataset.coord || coordName(idx, state.engine.size);
+  showToast(`${coord} · ${state.engine.board[idx] === BLACK ? "흑" : state.engine.board[idx] === WHITE ? "백" : "빈 교점"}`);
 }
 
 function fitBoard(ms = 700) {
@@ -1050,6 +1323,10 @@ function playHuman(idx) {
 function afterMove() {
   state.selected = null;
   state.selectedSet = new Set();
+  state.ghostLine = [];
+  state.thinkingCandidates = [];
+  state.liveCandidates = [];
+  state.liveCandidateKey = "";
   clearFuture(false);
   refreshBoardState();
   const e = state.engine;
@@ -1070,6 +1347,20 @@ function maybeAI() {
   if (!state.booted || state.aiThinking || e.gameOver || state.mode !== "ai") return;
   if (e.turn !== aiColor()) return;
   state.aiThinking = true;
+  try {
+    const rng = makeRng(((Date.now() ^ (e.moveNumber * 2654435761)) >>> 0));
+    state.thinkingCandidates = candidateMoves(e, rng).slice(0, 6).map((c, i) => ({
+      idx: c.stone,
+      coord: c.coord || coordName(c.stone, e.size),
+      score: +c.score.toFixed(2),
+      liberties: c.liberties,
+      captured: c.captured,
+      color: e.turn,
+      rank: i,
+    }));
+  } catch (err) {
+    state.thinkingCandidates = [];
+  }
   const id = ++state.requestId;
 
   // 스토리 장면의 상대는 대본대로 둔다. 대본이 막히면 AI로 넘어간다.
@@ -1345,6 +1636,7 @@ function updateUI() {
   els.futureBtn.setAttribute("aria-pressed", state.futureMode ? "true" : "false");
   els.askBtn.disabled = state.titleVisible;
   els.futureBtn.disabled = state.titleVisible || !state.story && state.engine.gameOver;
+  refreshLiveCandidates();
   if (state.story) {
     els.storyGoal.textContent = goalLabel(state.story);
     els.storyChapter.textContent = `${state.story.chapter?.no || "제1장"} · ${state.story.chapter?.title || ""} — ${state.story.no} ${state.story.title}`;
@@ -1355,6 +1647,8 @@ function updateUI() {
   renderGroupFacts();
   renderAIFacts();
   renderMoves();
+  renderKifu();
+  renderScenario();
   renderGpuFacts();
   syncBoard3D();
   if (state.graph) state.graph.restyle();
@@ -1502,9 +1796,26 @@ function renderGroupFacts() {
 
 function renderAIFacts() {
   const res = state.lastAI;
+  const live = state.aiThinking ? state.thinkingCandidates : (isHumanTurn() ? state.liveCandidates : []);
   if (state.aiThinking) {
     els.aiFacts.className = "facts";
-    els.aiFacts.innerHTML = kv("상태", `계산 중 · ${state.aiLevel}`) + kv("엔진", "플레이아웃 + 정적 평가");
+    els.aiFacts.innerHTML = kv("상태", `수 읽는 중 · ${state.aiLevel}`) + kv("엔진", "포석 서 + 정적 평가 + 플레이아웃");
+    if (state.thinkingCandidates.length) {
+      els.aiFacts.innerHTML += `<h3>읽는 후보</h3>`;
+      for (const c of state.thinkingCandidates.slice(0, 5)) {
+        els.aiFacts.innerHTML += kv(c.coord || coordName(c.idx, state.engine.size), `평가 ${c.score ?? "—"}`);
+      }
+    }
+    return;
+  }
+  if (live.length) {
+    els.aiFacts.className = "facts";
+    els.aiFacts.innerHTML = kv("차례", isHumanTurn() ? "내 차례 · 후보" : "AI") + kv("엔진", "포석 서 + 정적 평가");
+    els.aiFacts.innerHTML += `<h3>지금 좋아 보이는 곳</h3>`;
+    for (const c of live.slice(0, 5)) {
+      const extra = c.captured ? `따냄 ${c.captured} · 활로 ${c.liberties}` : `활로 ${c.liberties}`;
+      els.aiFacts.innerHTML += kv(c.coord || coordName(c.idx, state.engine.size), extra);
+    }
     return;
   }
   if (!res) {
@@ -1843,6 +2154,13 @@ async function boot() {
       ask: askHint,
       fitBoard,
       fitTitleBoard,
+      viewMode: (m) => applyViewMode(m, { ms: 400 }),
+      fitGraph,
+      kifu: () => renderKifu(),
+      scenario: () => renderScenario(),
+      setKifuOpen,
+      setFocusMode,
+      setRightTab,
     };
   } catch (e) {
     console.error(e);
@@ -1916,6 +2234,28 @@ els.completeRetryBtn.addEventListener("click", () => {
   if (state.story) loadStoryScene(state.story);
 });
 els.completeTitleBtn.addEventListener("click", () => startTitle());
+
+// ── 그래프·기보 UI
+for (const b of document.querySelectorAll(".stage-btn[data-view]")) {
+  b.addEventListener("click", () => applyViewMode(b.dataset.view, { ms: 520 }));
+}
+for (const b of document.querySelectorAll(".right-tab")) {
+  b.addEventListener("click", () => setRightTab(b.dataset.tab));
+}
+els.kifuToggleBtn?.addEventListener("click", () => setKifuOpen(!state.kifuOpen));
+els.focusBtn?.addEventListener("click", () => setFocusMode(!state.focusMode));
+els.kifuGraph?.addEventListener("click", onGraphPanelPick);
+els.kifuFloat?.addEventListener("click", onGraphPanelPick);
+els.scenarioGraph?.addEventListener("click", onGraphPanelPick);
+els.scenarioSteps?.addEventListener("click", onGraphPanelPick);
+els.scenarioCloseBtn?.addEventListener("click", () => {
+  state.scenarioOpen = false;
+  renderScenario();
+});
+els.scenarioToggleBtn?.addEventListener("click", () => {
+  state.scenarioOpen = !state.scenarioOpen;
+  renderScenario();
+});
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if (state.futureMode) setFutureMode(false);

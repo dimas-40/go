@@ -32,6 +32,13 @@ export const CHAPTERS = [
         ],
         after: ["좋아. 이제 네가 이 방의 주인이야."],
         opponent: { kind: "scripted", moves: ["G7"] },
+        // 그래프 뷰에 띄울 정석 시나리오. 보드의 좌표와 1:1로 대응한다.
+        teaching: [
+          { at: "C7", color: BLACK, role: "goal", label: "좌상귀" },
+          { at: "G7", color: BLACK, role: "goal", label: "우상귀" },
+          { at: "C3", color: BLACK, role: "goal", label: "좌하귀" },
+          { at: "G3", color: BLACK, role: "goal", label: "우하귀" },
+        ],
         next: "ch01s02",
       },
       {
@@ -54,6 +61,13 @@ export const CHAPTERS = [
         ],
         after: ["좋아. 이제 돌의 숨을 읽었구나."],
         opponent: { kind: "none" },
+        teaching: [
+          { at: "D5", color: BLACK, role: "context", label: "흑 벽" },
+          { at: "F5", color: BLACK, role: "context", label: "흑 벽" },
+          { at: "E4", color: BLACK, role: "context", label: "아래 단" },
+          { at: "E5", color: WHITE, role: "context", label: "갇힌 백" },
+          { at: "E6", color: BLACK, role: "goal", label: "마지막 숨" },
+        ],
         next: "ch01s03",
       },
       {
@@ -76,6 +90,13 @@ export const CHAPTERS = [
         ],
         after: ["연결은 힘이야. 혼자인 돌은 언제나 약해."],
         opponent: { kind: "none" },
+        teaching: [
+          { at: "C3", color: BLACK, role: "context", label: "왼쪽 흑" },
+          { at: "E3", color: BLACK, role: "context", label: "오른쪽 흑" },
+          { at: "D4", color: WHITE, role: "context", label: "위 백" },
+          { at: "D2", color: WHITE, role: "context", label: "아래 백" },
+          { at: "D3", color: BLACK, role: "goal", label: "연결점" },
+        ],
         next: "ch01s04",
       },
       {
@@ -98,6 +119,12 @@ export const CHAPTERS = [
         ],
         after: ["…좋은 수였어. 네가 나보다 나아."],
         opponent: { kind: "ai", level: "easy" },
+        teaching: [
+          { at: "C7", color: BLACK, role: "goal", label: "포석 · 좌상" },
+          { at: "G7", color: BLACK, role: "goal", label: "포석 · 우상" },
+          { at: "C3", color: BLACK, role: "goal", label: "포석 · 좌하" },
+          { at: "G3", color: BLACK, role: "goal", label: "포석 · 우하" },
+        ],
         next: null,
       },
     ],

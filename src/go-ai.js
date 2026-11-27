@@ -1,5 +1,10 @@
-// PARKSY GO — AI: 정적 평가 + 몬테카를로 플레이아웃 (MCTS-lite)
+// PARKSY GO — AI: 포석 북 + 정적 평가 + 몬테카를로 플레이아웃 (MCTS-lite)
 // 완전한 프로 기력은 아니다. 합법수·따냄·활로·눈 회피를 지키는 실전용 엔진.
+//
+// 2026-11-27 수정: 첫 수가 중앙(K10)으로 가고 이후에도 중앙에 뭉치던 문제를 고친다.
+// - 포석 단계에는 화점·3선/4선·상대 돌 접근점만 후보로 둔다(중앙 제외).
+// - 정적 평가에서 중앙 보너스를 없애고, 변·귀·간격(과밀 회피)을 본다.
+// - 초반 10수는 플레이아웃 대신 포석 북으로 둔다. 이후에만 MCTS를 돌린다.
 import { GoEngine, EMPTY, BLACK, WHITE, opponent, coordName } from "./go-engine.js";
 
 const STAR = {
@@ -7,6 +12,12 @@ const STAR = {
   13: [[3, 3], [9, 3], [3, 9], [9, 9], [6, 6]],
   19: [[3, 3], [9, 3], [15, 3], [3, 9], [9, 9], [15, 9], [3, 15], [9, 15], [15, 15]],
 };
+
+const APPROACH = [
+  [2, 1], [1, 2], [2, -1], [-1, 2],
+  [-2, 1], [1, -2], [-2, -1], [-1, -2],
+  [2, 0], [0, 2], [-2, 0], [0, -2],
+];
 
 export function makeRng(seed = 1) {
   let a = seed >>> 0;
@@ -26,23 +37,184 @@ function centerOf(size) {
   return c * size + c;
 }
 
-function staticEval(engine, idx, rng) {
+function stars(size) {
+  return STAR[size] || [];
+}
+
+function isStar(size, x, y) {
+  return stars(size).some(([sx, sy]) => sx === x && sy === y);
+}
+
+function lineOf(size, x, y) {
+  return Math.min(x, y, size - 1 - x, size - 1 - y) + 1;
+}
+
+function cornerDistance(size, x, y) {
+  const n = size - 1;
+  return Math.min(x + y, n - x + y, x + n - y, n - x + n - y);
+}
+
+function centerDistance(size, x, y) {
+  const c = (size - 1) / 2;
+  return Math.abs(x - c) + Math.abs(y - c);
+}
+
+function openingLimit(size) {
+  return size === 19 ? 12 : size === 13 ? 8 : 6;
+}
+
+function openingPhase(engine) {
+  if (engine.moveNumber < 2) return true;
+  if (engine.moveNumber >= openingLimit(engine.size)) return false;
+  const stones = engine.board.reduce((n, v) => n + (v ? 1 : 0), 0);
+  return stones < Math.max(4, openingLimit(engine.size));
+}
+
+function nearestStone(engine, x, y) {
+  const size = engine.size;
+  let best = Infinity;
+  let own = 0;
+  let opp = 0;
+  let ownNear = 0;
+  let oppNear = 0;
+  for (let i = 0; i < engine.total; i++) {
+    const v = engine.board[i];
+    if (!v) continue;
+    const sx = i % size;
+    const sy = (i / size) | 0;
+    const d = Math.abs(sx - x) + Math.abs(sy - y);
+    if (d < best) best = d;
+    if (v === engine.turn) {
+      if (d <= 4) own++;
+      if (d <= 2) ownNear++;
+    } else {
+      if (d <= 4) opp++;
+      if (d <= 2) oppNear++;
+    }
+  }
+  return { best, own, opp, ownNear, oppNear };
+}
+
+function addCandidate(set, engine, idx, color = engine.turn) {
+  if (!Number.isInteger(idx) || idx < 0 || idx >= engine.total) return;
+  if (engine.board[idx] !== EMPTY || idx === engine.ko) return;
+  if (engine.isEye(idx, color)) return;
+  set.add(idx);
+}
+
+/**
+ * 후보 생성. 포석 단계에서는 중앙을 아예 후보에서 뺀다.
+ * 중반 이후에는 돌 주변 2칸 + 3·4선 + 화점을 섞어, 국지전과 큰 자리를 함께 본다.
+ */
+function buildCandidates(engine) {
+  const size = engine.size;
+  const opening = openingPhase(engine);
+  const set = new Set();
+  const last = engine.lastMove;
+
+  if (opening) {
+    // 1) 빈 귀의 화점. 19로에서 중앙 화점(9,9)은 초반에 두지 않는다.
+    for (const [x, y] of stars(size)) {
+      if (size === 19 && x === 9 && y === 9) continue;
+      addCandidate(set, engine, y * size + x);
+    }
+    // 2) 3선·4선의 귀 주변. 화점이 막혔을 때 자연스러운 다음 자리.
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (lineOf(size, x, y) !== 3 && lineOf(size, x, y) !== 4) continue;
+        if (cornerDistance(size, x, y) > 7) continue;
+        addCandidate(set, engine, y * size + x);
+      }
+    }
+    // 3) 상대 돌에 붙는 접근점. 상대가 귀를 차지하면 그 옆에서 겨룬다.
+    for (let i = 0; i < engine.total; i++) {
+      if (!engine.board[i] || engine.board[i] === engine.turn) continue;
+      const x = i % size;
+      const y = (i / size) | 0;
+      if (cornerDistance(size, x, y) > 7) continue;
+      for (const [dx, dy] of APPROACH) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        if (lineOf(size, nx, ny) > 4) continue;
+        addCandidate(set, engine, ny * size + nx);
+      }
+    }
+    // 4) 마지막 수 주변의 벌림. 포석에서도 상대를 따라가는 폭은 좁게 둔다.
+    if (last !== null && last !== undefined) {
+      const lx = last % size;
+      const ly = (last / size) | 0;
+      for (const [dx, dy] of [[3, 0], [-3, 0], [0, 3], [0, -3], [2, 2], [-2, 2], [2, -2], [-2, -2]]) {
+        const nx = lx + dx;
+        const ny = ly + dy;
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        addCandidate(set, engine, ny * size + nx);
+      }
+    }
+  } else {
+    // 돌 주변 2칸. _nearEmpty()는 1칸만 보므로 한 겹 더 넓힌다.
+    for (let i = 0; i < engine.total; i++) {
+      if (!engine.board[i]) continue;
+      const sx = i % size;
+      const sy = (i / size) | 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          if (Math.abs(dx) + Math.abs(dy) > 2) continue;
+          const nx = sx + dx;
+          const ny = sy + dy;
+          if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+          addCandidate(set, engine, ny * size + nx);
+        }
+      }
+    }
+    // 큰 자리: 화점과 3·4선. 중반에도 중앙만 보지 않게 한다.
+    for (const [x, y] of stars(size)) addCandidate(set, engine, y * size + x);
+    if (engine.moveNumber < size * size * 0.55) {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          if (lineOf(size, x, y) === 3 || lineOf(size, x, y) === 4) {
+            addCandidate(set, engine, y * size + x);
+          }
+        }
+      }
+    }
+    // 9로는 공간이 좁으므로 빈 곳을 모두 후보로 둔다(평가 비용이 작다).
+    if (size === 9 || engine.total - engine.moveNumber < 90) {
+      for (let idx = 0; idx < engine.total; idx++) addCandidate(set, engine, idx);
+    }
+  }
+
+  // 후보가 너무 적으면 합법수 전체로 넓힌다. 중앙 금지는 포석에서만 유지.
+  if (set.size < 4) {
+    for (let idx = 0; idx < engine.total; idx++) {
+      if (!opening || centerDistance(size, idx % size, (idx / size) | 0) > size * 0.28) {
+        addCandidate(set, engine, idx);
+      }
+    }
+  }
+  return { set, opening };
+}
+
+function staticEval(engine, idx, rng, opening) {
   const color = engine.turn;
   const opp = opponent(color);
+  const size = engine.size;
+  const x = idx % size;
+  const y = (idx / size) | 0;
   const sim = engine.cloneFast();
   const res = sim.playFast(idx);
   if (!res.ok) return null;
   const own = sim.groupAt(idx);
   if (!own) return null;
-  const size = engine.size;
-  const x = idx % size;
-  const y = (idx / size) | 0;
+
   let s = res.captured.length * 30;
-  s += Math.min(own.liberties.length, 6) * 2.2;
-  if (own.liberties.length === 1) s -= 32;
-  else if (own.liberties.length === 2) s -= 5;
-  // 인접 상대 집단의 활로를 줄이는가
+  s += Math.min(own.liberties.length, 6) * 2.3;
+  if (own.liberties.length === 1) s -= 36;
+  else if (own.liberties.length === 2) s -= 4.5;
+
+  // 인접 상대 집단의 활로를 줄이는가 · 끊는가
   const seen = new Set();
+  let oppGroups = 0;
   for (const nb of sim.nbr[idx]) {
     if (sim.board[nb] !== opp) continue;
     const og = sim.groupAt(nb);
@@ -50,48 +222,77 @@ function staticEval(engine, idx, rng) {
     const key = og.stones[0];
     if (seen.has(key)) continue;
     seen.add(key);
-    if (og.liberties.length === 1) s += 9;
-    else if (og.liberties.length === 2) s += 2.5;
+    oppGroups++;
+    if (og.liberties.length === 1) s += 10;
+    else if (og.liberties.length === 2) s += 2.8;
+    if (og.liberties.length === 1) s += 0.5;
   }
-  // 마지막 수 근처 · 중앙 · 변
-  if (engine.lastMove != null) {
+  if (oppGroups >= 2) s += 1.6; // 양쪽 상대 집단 사이를 끊는 수
+
+  // 연결: 같은 색 이웃과 이어지는가
+  let ownAdj = 0;
+  for (const nb of sim.nbr[idx]) if (sim.board[nb] === color) ownAdj++;
+  s += ownAdj * (opening ? 0.45 : 1.15);
+  if (ownAdj === 0 && own.liberties.length === 1) s -= 2.0;
+
+  const line = lineOf(size, x, y);
+  if (line === 1) s -= opening ? 3.8 : 2.2;
+  else if (line === 2) s -= opening ? 0.9 : 0.35;
+  else if (line === 3 || line === 4) s += opening ? 1.35 : 0.8;
+  else s += 0.15;
+
+  const cd = cornerDistance(size, x, y);
+  const center = centerDistance(size, x, y);
+  if (opening) {
+    // 빈 귀를 먼저 차지하고, 중앙은 뒤로 미룬다.
+    s += Math.max(0, 7 - cd) * 0.62;
+    s -= Math.max(0, 1 - center / (size * 0.62)) * 0.9;
+  } else {
+    s += Math.max(0, 5 - cd) * 0.18;
+    // 중반 이후에도 중앙 과밀은 피한다.
+    if (engine.moveNumber < size * 1.6) {
+      s -= Math.max(0, 1 - center / (size * 0.5)) * 0.35;
+    }
+  }
+
+  // 간격: 초반에는 돌과 2~5칸 떨어지는 것이 자연스럽다. 붙어서 뭉치면 감점.
+  const near = nearestStone(engine, x, y);
+  if (Number.isFinite(near.best)) {
+    if (opening) {
+      s += Math.min(near.best, 6) * 0.62;
+      if (near.best <= 1) s -= 1.8;
+      if (near.ownNear >= 2) s -= 0.7;
+    } else {
+      if (near.best <= 2) s += 0.85;
+      else if (near.best <= 4) s += 0.35;
+      if (near.ownNear >= 3) s -= 0.4;
+    }
+  }
+
+  // 마지막 수 추종은 중반 이후에만, 약하게.
+  if (engine.moveNumber >= 10 && engine.lastMove !== null && engine.lastMove !== undefined) {
     const lx = engine.lastMove % size;
     const ly = (engine.lastMove / size) | 0;
     const d = Math.abs(x - lx) + Math.abs(y - ly);
-    if (d === 1) s += 1.8;
-    else if (d === 2) s += 0.8;
+    if (d === 1) s += 1.15;
+    else if (d === 2) s += 0.45;
   }
-  const c = (size - 1) / 2;
-  s += Math.max(0, 1 - (Math.abs(x - c) + Math.abs(y - c)) / (size * 1.1)) * 1.8;
-  if (x === 0 || y === 0 || x === size - 1 || y === size - 1) s -= 1.6;
+
   let emptyN = 0;
   for (const nb of sim.nbr[idx]) if (sim.board[nb] === EMPTY) emptyN++;
-  s += emptyN * 0.35;
-  s += rng() * 0.9;
+  s += emptyN * 0.3;
+  s += rng() * 0.8;
   return { score: s, captured: res.captured.length, liberties: own.liberties.length, stone: idx };
 }
 
 export function candidateMoves(engine, rng = Math.random) {
   const color = engine.turn;
-  const size = engine.size;
-  const near = engine._nearEmpty();
-  const stars = STAR[size] || [];
-  const candidates = new Set();
-  if (engine.moveNumber === 0) {
-    candidates.add(centerOf(size));
-  } else {
-    for (let idx = 0; idx < engine.total; idx++) {
-      if (near[idx]) candidates.add(idx);
-    }
-    for (const [x, y] of stars) candidates.add(y * size + x);
-    // 초반에는 중앙도 후보
-    if (engine.moveNumber < 6) candidates.add(centerOf(size));
-  }
+  const { set, opening } = buildCandidates(engine);
   const out = [];
-  for (const idx of candidates) {
+  for (const idx of set) {
     if (engine.board[idx] !== EMPTY || idx === engine.ko) continue;
     if (engine.isEye(idx, color)) continue;
-    const ev = staticEval(engine, idx, rng);
+    const ev = staticEval(engine, idx, rng, opening);
     if (ev) out.push(ev);
   }
   out.sort((a, b) => b.score - a.score);
@@ -143,6 +344,14 @@ function pickTop(candidates, level) {
   return candidates.slice(0, k);
 }
 
+function openingChoice(cands, rng, level) {
+  const n = Math.min(cands.length, level === "easy" ? 6 : 4);
+  if (n <= 1) return cands[0];
+  const topScore = cands[0].score || 0;
+  const pool = cands.slice(0, n).filter((c) => topScore - (c.score || 0) < 2.4);
+  return pool[(rng() * pool.length) | 0] || cands[0];
+}
+
 /**
  * @param {GoEngine} engine
  * @param {{level?: string, seed?: number, timeMs?: number, maxPlayouts?: number}} opts
@@ -151,17 +360,33 @@ export function chooseMove(engine, opts = {}) {
   const level = opts.level || "normal";
   const rng = makeRng(opts.seed ?? ((Date.now() ^ (engine.moveNumber * 2654435761)) >>> 0));
   if (engine.gameOver) return { move: null, reason: "game-over", level };
-  if (engine.moveNumber === 0) {
-    const idx = centerOf(engine.size);
-    return {
-      move: idx,
-      reason: "opening",
-      level,
-      candidates: [{ idx, score: 1, visits: 0, wins: 0 }],
-      visits: 0,
-      elapsed: 0,
-    };
+
+  // 포석: 중앙을 버리고 귀·변의 큰 자리부터. 플레이아웃 없이 빠르게 둔다.
+  if (openingPhase(engine) || engine.moveNumber === 0) {
+    const cands = candidateMoves(engine, rng);
+    if (cands.length) {
+      const pick = openingChoice(cands, rng, level);
+      return {
+        move: pick.stone,
+        reason: engine.moveNumber === 0 ? "opening-book" : "opening",
+        level,
+        candidates: cands.slice(0, 6).map((c, i) => ({
+          idx: c.stone,
+          coord: coordName(c.stone, engine.size),
+          score: +c.score.toFixed(2),
+          visits: 0,
+          wins: 0,
+          winRate: 0,
+          liberties: c.liberties,
+          best: i === 0,
+        })),
+        visits: 0,
+        totalVisits: 0,
+        elapsed: 0,
+      };
+    }
   }
+
   let candidates = candidateMoves(engine, rng);
   if (!candidates.length) {
     const legal = engine.legalMoves({ fast: true });

@@ -126,6 +126,33 @@ def main():
       completed: window.__parksyGo.state.storyComplete
     })"""))
 
+    # 온톨로지 그래프가 게임 중에 실제로 보이는지 — 겹침 모드 + 정석 시나리오 + 기보.
+    scene1_graph = ev("""({
+      view: window.__parksyGo.state.viewMode,
+      overlay: document.body.classList.contains('view-overlay'),
+      boardVisible: window.__parksyGo.board3d()?.group?.visible,
+      scenPanel: document.getElementById('scenarioPanel')?.className,
+      scenNodes: document.querySelectorAll('#scenarioGraph [data-idx]').length,
+      scenChips: document.querySelectorAll('#scenarioSteps .scenario-chip').length,
+      kifuNodes: document.querySelectorAll('#kifuGraph [data-idx]').length,
+      kifuStatus: document.getElementById('kifuStatus')?.textContent
+    })""")
+    report("scene1_graph", scene1_graph)
+
+    # 그래프 단독 보기 — 나무 판이 사라지고 온톨로지만 남는지.
+    ev("window.__parksyGo.viewMode('graph')")
+    wait(700)
+    shot("graph")
+    graph_mode = ev("""({
+      view: window.__parksyGo.state.viewMode,
+      graph: document.body.classList.contains('view-graph'),
+      boardVisible: window.__parksyGo.board3d()?.group?.visible,
+      kifuNodes: document.querySelectorAll('#kifuGraph [data-idx]').length
+    })""")
+    report("graph_mode", graph_mode)
+    ev("window.__parksyGo.viewMode('overlay')")
+    wait(600)
+
     ev("window.__parksyGo.play('C7')")
     wait_until("window.__parksyGo?.state?.storyComplete === true")
     wait(400)
@@ -204,15 +231,35 @@ def main():
     ev("window.__parksyGo.startFree()")
     wait(1400)
     shot("free")
-    report("free", ev("""({
+    free = ev("""({
       title: document.getElementById('titleScreen')?.className,
       body: document.body.className,
       dash: document.querySelector('.dashboard-card')?.className || null,
       dashBlack: document.getElementById('dashBlack')?.textContent,
       dashWhite: document.getElementById('dashWhite')?.textContent,
       boardStatus: document.getElementById('boardStatus')?.textContent,
-      plates: !!document.getElementById('matchHud')
-    })"""))
+      plates: !!document.getElementById('matchHud'),
+      view: window.__parksyGo.state.viewMode,
+      tab: window.__parksyGo.state.rightTab,
+      kifuNodes: document.querySelectorAll('#kifuGraph [data-idx]').length
+    })""")
+    report("free", free)
+
+    # AI 첫 후보가 중앙에 몰리지 않는지 — 엔진 좌표로 직접 검사.
+    ai_candidates = ev("""(() => {
+      const st = window.__parksyGo.state;
+      const cands = (st.liveCandidates || []).slice(0, 6);
+      const size = st.engine.size;
+      const mid = (size - 1) / 2;
+      // 9줄에서는 중앙 반경 1, 13줄 이상에서는 2까지만 중앙으로 센다.
+      const r = size <= 9 ? 1 : 2;
+      const center = cands.filter((c) => {
+        const x = c.idx % size, y = Math.floor(c.idx / size);
+        return Math.abs(x - mid) <= r && Math.abs(y - mid) <= r;
+      }).length;
+      return { cands: cands.map((c) => c.coord), center_hits: center, total: cands.length, center_radius: r };
+    })()""")
+    report("ai_candidates", ai_candidates)
 
     # 세로 화면(휴대폰)에서 판이 잘리지 않는지.
     send("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
@@ -223,9 +270,35 @@ def main():
     send("Emulation.clearDeviceMetricsOverride")
     wait(400)
 
+    # 새 UI 계약 — 그래프가 게임 중에 보이고, AI가 중앙에 몰리지 않는다.
+    problems = []
+    sg = scene1_graph or {}
+    if sg.get("view") != "overlay" or sg.get("overlay") is not True:
+        problems.append("story scene did not enter overlay view")
+    if sg.get("boardVisible") is not True:
+        problems.append("3D board hidden in overlay view")
+    if (sg.get("scenNodes") or 0) < 4:
+        problems.append("scenario graph missing nodes")
+    if (sg.get("kifuNodes") or 0) < 1:
+        problems.append("kifu graph missing nodes")
+    gm = graph_mode or {}
+    if gm.get("view") != "graph" or gm.get("boardVisible") is not False:
+        problems.append("graph mode did not hide the 3D board")
+    fr = free or {}
+    if fr.get("view") != "overlay":
+        problems.append("free mode did not enter overlay view")
+    if (fr.get("kifuNodes") or 0) < 1:
+        problems.append("free mode kifu graph empty")
+    ac = ai_candidates or {}
+    if (ac.get("total") or 0) < 3:
+        problems.append("AI candidates missing")
+    if (ac.get("center_hits") or 0) > 0:
+        problems.append("AI candidates clustered at center")
+    report("gate", {"ok": not problems, "problems": problems})
+
     report("errors", errors[:20])
     ws.close()
-    return 0 if not any("EXCEPTION" in e for e in errors) else 2
+    return 0 if not any("EXCEPTION" in e for e in errors) and not problems else 2
 
 
 if __name__ == "__main__":

@@ -861,3 +861,258 @@ body.future-mode .board-wrap { border-color: rgba(157, 123, 255, 0.5); box-shado
   .board-wrap { height: 58vh; min-height: 340px; }
   .dash-stage { height: 70px; }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   2026-11-27 그래프 뷰 · 기보 온톨로지 · 압축 UI
+   판 위에 겹치는 온톨로지, 수순 그래프, 정석 시나리오.
+   ═══════════════════════════════════════════════════════════ */
+.layout {
+  grid-template-columns: 262px minmax(0, 1fr) 336px;
+  gap: 10px;
+  padding: 10px;
+}
+.card { padding: 10px; border-radius: 10px; }
+.card h2 { margin-bottom: 7px; font-size: 9.8px; }
+.facts { font-size: 11px; }
+.facts .kv { padding: 2px 0; }
+
+/* ── 무대 레일 (보기 모드) ───────────────────────────────── */
+.stage-rail {
+  position: absolute; top: 12px; right: 12px; z-index: 7;
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px; border-radius: 999px;
+  border: 1px solid rgba(200, 161, 94, 0.3);
+  background: rgba(11, 9, 7, 0.72);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 232, 190, 0.07) inset;
+  backdrop-filter: blur(10px);
+}
+.stage-btn {
+  appearance: none; cursor: pointer; border: 0; border-radius: 999px;
+  padding: 5px 10px; background: transparent;
+  color: rgba(220, 198, 162, 0.7);
+  font-family: var(--font); font-size: 10.5px; letter-spacing: .04em;
+  white-space: nowrap; transition: color .15s, background .15s, box-shadow .15s;
+}
+.stage-btn:hover { color: #f4e8d4; }
+.stage-btn.is-on,
+.stage-btn[aria-pressed="true"] {
+  color: #1b1208;
+  background: linear-gradient(180deg, #f0d6a4, #c99a57);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4), 0 1px 0 rgba(255, 248, 228, 0.4) inset;
+  font-weight: 700;
+}
+.stage-sep { width: 1px; height: 16px; background: rgba(200, 161, 94, 0.28); margin: 0 2px; }
+body.title-mode .stage-rail { display: none; }
+
+/* ── 그래프 보기 상태 ───────────────────────────────────── */
+.view-graph .board-wrap {
+  background:
+    radial-gradient(70% 70% at 50% 45%, rgba(20, 48, 52, 0.46), transparent 72%),
+    radial-gradient(50% 50% at 50% 50%, rgba(43, 214, 176, 0.06), transparent 70%),
+    linear-gradient(180deg, rgba(4, 10, 13, 0.99), rgba(2, 5, 7, 1));
+}
+.view-graph .board-frame { opacity: .4; }
+.view-overlay .board-frame::before,
+.view-overlay .board-frame::after { background: linear-gradient(90deg, transparent, rgba(43, 214, 176, 0.36), transparent); }
+.view-overlay .board-wrap { border-color: rgba(43, 214, 176, 0.24); }
+body.focus-mode .panel { display: none; }
+body.focus-mode .layout { grid-template-columns: minmax(0, 1fr); padding: 8px; }
+body.focus-mode .board-wrap { border-radius: 14px; }
+
+/* ── 기보 SVG ───────────────────────────────────────────── */
+.kifu-card { overflow: hidden; }
+.kifu-svg {
+  display: block; width: 100%; height: auto; overflow: visible;
+  border-radius: 8px;
+  background:
+    radial-gradient(130% 90% at 50% 0%, rgba(200, 161, 94, 0.07), transparent 60%),
+    linear-gradient(160deg, rgba(9, 8, 7, 0.75), rgba(14, 11, 8, 0.4));
+}
+.kifu-status {
+  margin-top: 6px; color: rgba(196, 176, 146, 0.62);
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em;
+}
+.kifu-grid { stroke: rgba(200, 161, 94, 0.09); stroke-width: 0.55; }
+.kifu-edge { stroke: rgba(200, 161, 94, 0.32); stroke-width: 0.9; fill: none; }
+.kifu-edge.kifu-wrap { opacity: .5; }
+.kifu-edge.future { stroke: #9d7bff; stroke-width: 1.2; opacity: .92; }
+.kifu-edge.ghost { stroke: #f0d6a4; stroke-width: 1.1; opacity: .9; }
+.kifu-edge.teaching { stroke: #2bd6b0; stroke-width: 1.1; opacity: .9; }
+.kifu-ellipsis { fill: rgba(196, 176, 146, 0.6); font-family: var(--mono); font-size: 8px; text-anchor: end; }
+.kifu-empty { fill: rgba(196, 176, 146, 0.68); font-size: 10.5px; text-anchor: middle; }
+.kifu-empty.small { fill: rgba(196, 176, 146, 0.42); font-size: 8.6px; }
+.kifu-move .kn-dot { stroke-width: 1; }
+.kifu-move.black .kn-dot { fill: #111923; stroke: rgba(122, 178, 255, 0.62); }
+.kifu-move.white .kn-dot { fill: #f0e2c4; stroke: rgba(255, 240, 208, 0.9); }
+.kifu-move .kn-label { font-family: var(--mono); font-size: 6.6px; text-anchor: middle; pointer-events: none; }
+.kifu-move.black .kn-label { fill: #cfe4ff; }
+.kifu-move.white .kn-label { fill: #3b2a13; font-weight: 600; }
+.kifu-move.is-last .kn-dot { stroke: #fff3d6; stroke-width: 1.5; }
+.kifu-pulse {
+  fill: none; stroke: rgba(255, 240, 208, 0.7); stroke-width: 1;
+  animation: kifuPulse 2s ease-out infinite;
+}
+@keyframes kifuPulse { 0% { opacity: .9; transform: scale(.85); transform-origin: center; } 70% { opacity: 0; transform: scale(1.25); } 100% { opacity: 0; } }
+.kifu-future .kn-dot { fill: rgba(157, 123, 255, 0.18); stroke: #b9a5ff; stroke-width: 1.1; stroke-dasharray: 2 2; }
+.kifu-ghost .kn-dot { fill: rgba(240, 214, 164, 0.16); stroke: #f0d6a4; stroke-width: 1.1; }
+.kifu-teaching .kn-dot { fill: rgba(43, 214, 176, 0.14); stroke: #57e9c4; stroke-width: 1.1; }
+.kifu-future .kn-label, .kifu-ghost .kn-label, .kifu-teaching .kn-label { font-family: var(--mono); font-size: 6.5px; text-anchor: middle; fill: #f6ecd8; }
+.kifu-caption { fill: rgba(196, 176, 146, 0.62); font-family: var(--mono); font-size: 6.6px; text-anchor: middle; }
+.kifu-caption.ghost { fill: rgba(240, 214, 164, 0.8); }
+.kifu-caption.teaching { fill: rgba(87, 233, 196, 0.8); }
+.kifu-ai .kn-dot { fill: #7df5d4; stroke: rgba(125, 245, 212, 0.5); stroke-width: .8; }
+.kifu-ai.black .kn-dot { fill: #4aa8ff; }
+.kifu-ai.white .kn-dot { fill: #ffcf6a; }
+.kifu-ai-label { fill: rgba(125, 245, 212, 0.8); font-family: var(--mono); font-size: 6.5px; letter-spacing: .1em; }
+.kifu-legend-text { fill: rgba(196, 176, 146, 0.55); font-family: var(--mono); font-size: 6.5px; }
+.swatch.black { fill: #111923; stroke: rgba(122, 178, 255, .6); }
+.swatch.white { fill: #f0e2c4; }
+.kn { cursor: pointer; }
+.kn:hover .kn-dot { filter: brightness(1.35); }
+
+/* ── 판 위 기보 패널 ─────────────────────────────────────── */
+.kifu-float {
+  position: absolute; left: 16px; bottom: 92px; z-index: 8;
+  width: min(322px, calc(100% - 32px));
+  border-radius: 12px; padding: 9px;
+  border: 1px solid rgba(200, 161, 94, 0.34);
+  background: linear-gradient(160deg, rgba(16, 12, 8, 0.9), rgba(6, 5, 4, 0.92));
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 40px rgba(200, 161, 94, 0.05) inset;
+  backdrop-filter: blur(14px);
+  animation: kifuIn .28s ease-out both;
+}
+@keyframes kifuIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.kifu-float-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 0 2px 5px; color: rgba(220, 198, 162, 0.72);
+  font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+}
+.kifu-float-head b { color: var(--brass-bright); font-family: var(--mono); font-weight: 500; letter-spacing: 0; }
+.kifu-float .kifu-svg { background: transparent; }
+@media (max-width: 720px) {
+  .kifu-float { left: 10px; right: 10px; width: auto; bottom: 112px; }
+  .stage-rail { top: 8px; right: 8px; padding: 3px; gap: 2px; }
+  .stage-btn { padding: 4px 7px; font-size: 9.5px; }
+}
+
+/* ── 정석 시나리오 패널 ──────────────────────────────────── */
+.scenario-panel {
+  position: fixed; left: 16px; top: 72px; z-index: 26;
+  width: min(330px, calc(100vw - 32px));
+  padding: 10px 10px 8px; border-radius: 14px;
+  border: 1px solid rgba(200, 161, 94, 0.34);
+  background:
+    radial-gradient(320px 180px at 50% -20%, rgba(43, 214, 176, 0.1), transparent 60%),
+    linear-gradient(160deg, rgba(19, 15, 10, 0.94), rgba(6, 8, 9, 0.94));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6), 0 0 40px rgba(43, 214, 176, 0.04) inset;
+  backdrop-filter: blur(14px);
+  animation: scenarioIn .35s ease-out both;
+}
+@keyframes scenarioIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+.scenario-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  color: rgba(220, 198, 162, 0.7); font-size: 9.5px; letter-spacing: .08em;
+  padding: 0 2px 4px;
+}
+.scenario-head b { color: var(--brass-bright); font-weight: 600; letter-spacing: 0; }
+.scenario-close {
+  appearance: none; cursor: pointer; border: 0; background: transparent;
+  color: rgba(220, 198, 162, 0.6); font-size: 16px; line-height: 1; padding: 0 2px;
+}
+.scenario-close:hover { color: #fff1d8; }
+.scenario-svg { background: transparent; }
+.scenario-star { fill: rgba(43, 214, 176, 0.35); }
+.scenario-edge { stroke-width: 1; fill: none; }
+.scenario-edge.context { stroke: rgba(196, 176, 146, 0.3); }
+.scenario-edge.goal { stroke: rgba(233, 197, 131, 0.8); stroke-width: 1.2; }
+.scenario-edge.response { stroke: rgba(43, 214, 176, 0.65); }
+.scenario-now .kn-dot { fill: #0d1a17; stroke: #d8bd88; stroke-width: 1.3; }
+.scenario-now .kn-label { fill: #ffeccd; font-family: "Noto Serif KR", serif; font-size: 9px; text-anchor: middle; }
+.scenario-root-label { fill: rgba(220, 198, 162, 0.55); font-size: 7px; text-anchor: middle; letter-spacing: .12em; }
+.scenario-node { cursor: pointer; }
+.scenario-node .scenario-dot { stroke-width: 1; }
+.scenario-node.black .scenario-dot { fill: #101821; stroke: rgba(122, 178, 255, 0.7); }
+.scenario-node.white .scenario-dot { fill: #f1e4c7; stroke: rgba(255, 240, 208, 0.9); }
+.scenario-node.muted { opacity: .48; }
+.scenario-node.focus .scenario-dot { stroke: #ffeccd; stroke-width: 1.6; }
+.scenario-node.played { opacity: .32; }
+.scenario-node.played .scenario-dot { stroke-dasharray: 2 2; }
+.scenario-node-label { font-family: var(--mono); font-size: 6.2px; text-anchor: middle; pointer-events: none; }
+.scenario-node.black .scenario-node-label { fill: #d2e5ff; }
+.scenario-node.white .scenario-node-label { fill: #3b2a13; }
+.scenario-node-caption { fill: rgba(196, 176, 146, 0.62); font-size: 6.4px; text-anchor: middle; }
+.scenario-node.focus .scenario-node-caption { fill: rgba(255, 236, 204, 0.85); }
+.scenario-pulse {
+  fill: none; stroke: rgba(240, 214, 164, 0.75); stroke-width: .9;
+  animation: scenarioPulse 2.2s ease-out infinite;
+}
+@keyframes scenarioPulse { 0% { opacity: .8; transform: scale(.82); transform-origin: center; } 75% { opacity: 0; transform: scale(1.24); } 100% { opacity: 0; } }
+.scenario-foot { fill: rgba(196, 176, 146, 0.42); font-size: 6.4px; }
+.scenario-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.scenario-chip {
+  appearance: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 7px; border-radius: 999px;
+  border: 1px solid rgba(200, 161, 94, 0.26);
+  background: rgba(9, 8, 6, 0.7); color: rgba(230, 212, 180, 0.82);
+  font-family: var(--mono); font-size: 9px;
+}
+.scenario-chip:hover { border-color: rgba(233, 197, 131, 0.7); color: #fff1d8; }
+.scenario-chip.done { opacity: .45; }
+.scenario-chip i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.scenario-chip i.b { background: #4aa8ff; }
+.scenario-chip i.w { background: #ffcf6a; }
+.scenario-chip b { font-weight: 600; }
+.scenario-chip span { opacity: .6; font-family: var(--font); font-size: 8.5px; }
+@media (max-width: 720px) {
+  .scenario-panel { left: 8px; right: 8px; top: 58px; width: auto; padding: 8px; }
+  .scenario-panel .scenario-svg { max-height: 150px; }
+}
+
+/* ── 오른쪽 분석 탭 ──────────────────────────────────────── */
+.panel.right { display: flex; flex-direction: column; gap: 8px; }
+.right-tabs {
+  display: flex; gap: 3px; padding: 3px; border-radius: 999px;
+  border: 1px solid rgba(200, 161, 94, 0.26);
+  background: rgba(10, 8, 6, 0.72);
+  flex: 0 0 auto;
+}
+.right-tab {
+  appearance: none; cursor: pointer; border: 0; border-radius: 999px;
+  flex: 1 1 0; padding: 5px 4px; background: transparent;
+  color: rgba(220, 198, 162, 0.62);
+  font-family: var(--font); font-size: 10px; letter-spacing: .08em;
+  transition: color .15s, background .15s;
+}
+.right-tab:hover { color: #f4e8d4; }
+.right-tab.is-on {
+  color: #1b1208; font-weight: 700;
+  background: linear-gradient(180deg, #f0d6a4, #c99a57);
+}
+.right-pane { display: none; flex-direction: column; gap: 8px; min-height: 0; }
+.right-pane.is-on { display: flex; }
+.right-pane .card { flex: 0 0 auto; }
+.right-pane[data-pane="kifu"] .moves { max-height: calc(100vh - 190px); }
+@media (max-width: 1180px) {
+  .panel.right { display: flex; flex-direction: column; overflow: visible; }
+  .panel.right .right-pane { display: none; }
+  .panel.right .right-pane.is-on { display: flex; flex-direction: column; }
+}
+@media (max-width: 1020px) {
+  .panel.right { display: flex; flex-direction: column; }
+  .right-pane.is-on { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+  .right-pane[data-pane="onto"] .kifu-card { grid-column: 1 / -1; }
+  .right-pane[data-pane="kifu"] { display: none; }
+  .right-pane[data-pane="kifu"].is-on { display: flex; }
+}
+@media (max-width: 600px) {
+  .right-pane.is-on { grid-template-columns: 1fr; }
+}
+
+/* 모바일: 상태 배지와 무대 레일이 겹치지 않게 */
+@media (max-width: 600px) {
+  .board-status { display: none; }
+  .stage-rail { top: 8px; }
+}
+/* 이야기 모드에서는 오른쪽 분석 패널이 없으므로 시나리오가 곧 기보 그래프다 */
+body.story-mode .scenario-panel { display: block; }
+body.story-mode .scenario-panel.hidden { display: none; }
