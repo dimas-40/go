@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>PARKSY GO — 온톨로지 그래프 바둑 엔진</title>
+  <meta name="description" content="바둑판을 온톨로지 그래프로 펴고 WebGPU(Vulkan/Dawn)로 그리는 바둑 엔진. 규칙·SGF·플레이아웃 AI·GPU 영향도.">
+  <meta name="theme-color" content="#05070a">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23070b10'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%232bd6b0' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23e0b070'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/build/three.webgpu.js",
+        "three/webgpu": "./vendor/three/build/three.webgpu.js",
+        "three/tsl": "./vendor/three/build/three.tsl.js",
+        "three/addons/": "./vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">碁</span>
+        <div class="brand-text">
+          <h1>PARKSY GO</h1>
+          <p>온톨로지 그래프 × WebGPU 바둑 엔진</p>
+        </div>
+      </div>
+      <div class="hud">
+        <span id="backendBadge" class="chip">부팅 중</span>
+        <span id="adapterBadge" class="chip dim">GPU 확인 중</span>
+        <span id="fpsBadge" class="chip dim">-- FPS</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel left">
+        <section class="card">
+          <h2>대국</h2>
+          <label class="row"><span>판 크기</span>
+            <select id="sizeSelect">
+              <option value="19" selected>19 × 19</option>
+              <option value="13">13 × 13</option>
+              <option value="9">9 × 9</option>
+            </select>
+          </label>
+          <label class="row"><span>내 돌</span>
+            <select id="humanSelect">
+              <option value="1" selected>흑</option>
+              <option value="2">백</option>
+            </select>
+          </label>
+          <label class="row"><span>모드</span>
+            <select id="modeSelect">
+              <option value="ai" selected>사람 vs AI</option>
+              <option value="local">사람 vs 사람</option>
+            </select>
+          </label>
+          <label class="row"><span>AI 기력</span>
+            <select id="levelSelect">
+              <option value="easy">쉬움</option>
+              <option value="normal" selected>보통</option>
+              <option value="strong">강함</option>
+              <option value="max">최대</option>
+            </select>
+          </label>
+          <label class="row"><span>덤</span>
+            <input id="komiInput" type="number" min="0" max="15" step="0.5" value="6.5">
+          </label>
+          <label class="row"><span>계가</span>
+            <select id="scoreSelect">
+              <option value="area" selected>중국식 (면적)</option>
+              <option value="territory">일본식 (집+따냄)</option>
+            </select>
+          </label>
+          <button id="newGameBtn" class="btn primary">새 대국</button>
+        </section>
+
+        <section class="card">
+          <h2>조작</h2>
+          <div class="btn-grid">
+            <button id="passBtn" class="btn">패스</button>
+            <button id="undoBtn" class="btn">무르기</button>
+            <button id="resignBtn" class="btn danger">기권</button>
+            <button id="fitBtn" class="btn">화면 맞춤</button>
+          </div>
+          <button id="influenceBtn" class="btn toggle" aria-pressed="false">영향도 보기</button>
+          <button id="territoryBtn" class="btn toggle" aria-pressed="false">집 표시</button>
+          <div class="file-row">
+            <button id="exportBtn" class="btn small">SGF 내보내기</button>
+            <label class="btn small file">SGF 불러오기
+              <input id="importInput" type="file" accept=".sgf,application/x-go-sgf,text/plain" hidden>
+            </label>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>국면</h2>
+          <div class="turn-row">
+            <span id="turnDot" class="dot black"></span>
+            <strong id="turnText">흑 차례</strong>
+            <span id="moveNo" class="muted">0수</span>
+          </div>
+          <div id="scoreBox" class="score-box"></div>
+          <div id="aiStatus" class="muted"></div>
+        </section>
+      </aside>
+
+      <section class="board-wrap">
+        <div id="graph" class="graph"></div>
+        <div id="bootOverlay" class="boot">
+          <div class="boot-inner">
+            <span class="spinner"></span>
+            <p id="bootText">WebGPU 장치를 여는 중…</p>
+          </div>
+        </div>
+        <div id="banner" class="banner hidden"></div>
+        <div class="board-hint">교점 클릭 = 착수 · 돌 클릭 = 돌집단 사실 · 드래그 = 회전 · 휠 = 확대</div>
+      </section>
+
+      <aside class="panel right">
+        <section class="card">
+          <h2>온톨로지</h2>
+          <div id="ontologyFacts" class="facts"></div>
+        </section>
+        <section class="card">
+          <h2>집단 · 활로</h2>
+          <div id="groupFacts" class="facts muted">돌을 클릭하세요.</div>
+        </section>
+        <section class="card">
+          <h2>AI 후보</h2>
+          <div id="aiFacts" class="facts muted">사람 차례입니다.</div>
+        </section>
+        <section class="card">
+          <h2>대국 기록</h2>
+          <ol id="moveLog" class="moves"></ol>
+        </section>
+        <section class="card">
+          <h2>GPU</h2>
+          <div id="gpuFacts" class="facts"></div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <span>PARKSY GO · 바둑 규칙 엔진 + SGF + 플레이아웃 AI</span>
+      <span>WebGPU는 Android/Linux에서 Dawn을 거쳐 Vulkan을 씁니다.</span>
+    </footer>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
