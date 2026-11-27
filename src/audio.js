@@ -402,12 +402,16 @@ function speakRecorded(text, opts) {
     recordedAudio.pause();
     recordedAudio.src = voiceFile(text);
     recordedAudio.volume = Math.max(0, Math.min(1, opts.volume ?? 0.95));
-    recordedAudio.onerror = () => {
+    let fellBack = false;
+    const fallback = () => {
+      if (fellBack) return;
+      fellBack = true;
       recordedAudio = null;
       speakBrowser(text, opts);
     };
+    recordedAudio.onerror = fallback;
     const p = recordedAudio.play();
-    if (p && p.catch) p.catch(() => speakBrowser(text, opts));
+    if (p && p.catch) p.catch(fallback);
     return true;
   } catch (err) {
     return false;
