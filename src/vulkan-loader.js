@@ -51,6 +51,13 @@ function curatedLimits(limits) {
  * WebGPU 어댑터·장치를 연다. 실패해도 예외를 던지지 않고 WebGL2 폴백 정보를 돌려준다.
  * @param {{onLost?: (info:any)=>void}} [opts]
  */
+function withTimeout(promise, ms, fallback = null) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 export async function loadVulkanDevice(opts = {}) {
   const platform = platformName();
   const gpu = typeof navigator !== "undefined" ? navigator.gpu : null;
@@ -72,7 +79,7 @@ export async function loadVulkanDevice(opts = {}) {
   ];
   for (const request of attempts) {
     try {
-      adapter = await gpu.requestAdapter(request);
+      adapter = await withTimeout(gpu.requestAdapter(request), 900);
     } catch (e) {
       adapter = null;
     }
@@ -96,13 +103,13 @@ export async function loadVulkanDevice(opts = {}) {
 
   const requestDevice = async () => {
     try {
-      return await adapter.requestDevice({ requiredFeatures: features, requiredLimits });
+      return await withTimeout(adapter.requestDevice({ requiredFeatures: features, requiredLimits }), 1500);
     } catch (e) {
       try {
-        return await adapter.requestDevice({ requiredFeatures: features });
+        return await withTimeout(adapter.requestDevice({ requiredFeatures: features }), 1200);
       } catch (e2) {
         try {
-          return await adapter.requestDevice();
+          return await withTimeout(adapter.requestDevice(), 1200);
         } catch (e3) {
           return null;
         }

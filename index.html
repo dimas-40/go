@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>PARKSY GO — 온톨로지 그래프 바둑 엔진</title>
-  <meta name="description" content="바둑판을 온톨로지 그래프로 펴고 WebGPU(Vulkan/Dawn)로 그리는 바둑 엔진. 규칙·SGF·플레이아웃 AI·GPU 영향도.">
+  <title>귀신의 한 수 — PARKSY GO</title>
+  <meta name="description" content="귀신 선생과 함께 두는 3D 바둑. WebGPU 온톨로지 그래프, 미래 시뮬레이션, 정석·활로·연결 레슨.">
   <meta name="theme-color" content="#05070a">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23070b10'/%3E%3Ccircle cx='32' cy='32' r='20' fill='none' stroke='%232bd6b0' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%23e0b070'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=20261127i">
   <script type="importmap">
     {
       "imports": {
@@ -19,25 +19,53 @@
     }
   </script>
 </head>
-<body>
+<body class="title-mode">
   <div id="app">
     <header class="topbar">
       <div class="brand">
         <span class="mark">碁</span>
         <div class="brand-text">
-          <h1>PARKSY GO</h1>
-          <p>온톨로지 그래프 × WebGPU 바둑 엔진</p>
+          <h1>귀신의 한 수</h1>
+          <p>PARKSY GO · STORY BADUK · WEBGPU</p>
         </div>
       </div>
       <div class="hud">
         <span id="backendBadge" class="chip">부팅 중</span>
         <span id="adapterBadge" class="chip dim">GPU 확인 중</span>
         <span id="fpsBadge" class="chip dim">-- FPS</span>
+        <button id="titleBtn" class="chip chip-btn" type="button">타이틀</button>
       </div>
     </header>
 
     <main class="layout">
       <aside class="panel left">
+        <section class="card dashboard-card">
+          <h2>대시보드</h2>
+          <div class="dash-stage" aria-hidden="true">
+            <span class="dash-stone black"></span>
+            <span class="dash-stone white"></span>
+          </div>
+          <div class="dash-caption">
+            <span>흑 <b id="dashBlack">0</b></span>
+            <em>묵의 대국</em>
+            <span>백 <b id="dashWhite">0</b></span>
+          </div>
+          <div class="turn-row">
+            <span id="turnDot" class="dot black"></span>
+            <strong id="turnText">흑 차례</strong>
+            <span id="moveNo" class="muted">0수</span>
+          </div>
+          <div id="scoreBox" class="score-box"></div>
+          <div id="aiStatus" class="muted"></div>
+        </section>
+
+        <section class="card">
+          <h2>이야기</h2>
+          <button id="askBtn" class="btn">묻는다 · 귀신의 힌트</button>
+          <button id="futureBtn" class="btn toggle" aria-pressed="false">본다 · 미래 시뮬레이션</button>
+          <p class="mini-note">미래 보기가 켜지면 빈 교점을 눌러 상상해 보세요. 다시 누르면 둘 수 있습니다.</p>
+        </section>
+
         <section class="card">
           <h2>대국</h2>
           <label class="row"><span>판 크기</span>
@@ -97,20 +125,27 @@
           </div>
         </section>
 
-        <section class="card">
-          <h2>국면</h2>
-          <div class="turn-row">
-            <span id="turnDot" class="dot black"></span>
-            <strong id="turnText">흑 차례</strong>
-            <span id="moveNo" class="muted">0수</span>
-          </div>
-          <div id="scoreBox" class="score-box"></div>
-          <div id="aiStatus" class="muted"></div>
-        </section>
       </aside>
 
       <section class="board-wrap">
         <div id="graph" class="graph"></div>
+        <svg id="boardOverlay" class="board-overlay" aria-hidden="true"></svg>
+        <div class="board-frame" aria-hidden="true"></div>
+        <div id="boardStatus" class="board-status">호선 · 19줄 · 0수</div>
+        <div class="match-hud" id="matchHud" aria-hidden="true">
+          <div class="player-plate black" id="blackPlate">
+            <span class="p-stone black"></span>
+            <div class="p-meta"><small id="blackName">흑</small><b id="blackCaptures">0</b></div>
+          </div>
+          <div class="turn-medallion">
+            <span class="medallion-stone black" id="medallionStone"></span>
+            <em id="medallionText">착수</em>
+          </div>
+          <div class="player-plate white" id="whitePlate">
+            <div class="p-meta"><small id="whiteName">백</small><b id="whiteCaptures">0</b></div>
+            <span class="p-stone white"></span>
+          </div>
+        </div>
         <div id="bootOverlay" class="boot">
           <div class="boot-inner">
             <span class="spinner"></span>
@@ -118,7 +153,7 @@
           </div>
         </div>
         <div id="banner" class="banner hidden"></div>
-        <div class="board-hint">교점 클릭 = 착수 · 돌 클릭 = 돌집단 사실 · 드래그 = 회전 · 휠 = 확대</div>
+        <div class="board-hint">교점 클릭 = 착수 · 돌 클릭 = 돌집단 · 드래그 = 회전 · 휠 = 확대</div>
       </section>
 
       <aside class="panel right">
@@ -146,11 +181,70 @@
     </main>
 
     <footer class="footer">
-      <span>PARKSY GO · 바둑 규칙 엔진 + SGF + 플레이아웃 AI</span>
+      <span>귀신의 한 수 · 바둑 규칙 엔진 + SGF + 미래 시뮬레이션</span>
       <span>WebGPU는 Android/Linux에서 Dawn을 거쳐 Vulkan을 씁니다.</span>
     </footer>
   </div>
 
-  <script type="module" src="./src/main.js"></script>
+  <!-- 게임 HUD -->
+  <div id="storyHud" class="story-hud hidden">
+    <div class="story-chapter" id="storyChapter">제1장 · 빈 판</div>
+    <div class="story-goal"><span>목표</span><b id="storyGoal"></b></div>
+    <button id="storyExitBtn" class="chip chip-btn" type="button">나가기</button>
+  </div>
+
+  <aside id="ghostPanel" class="ghost-panel hidden" aria-live="polite">
+    <div class="ghost-avatar">墨</div>
+    <div class="ghost-body">
+      <div class="ghost-name">묵 · 귀신 선생</div>
+      <p id="ghostText"></p>
+      <div class="ghost-actions">
+        <button id="ghostNextBtn" class="btn small" type="button">계속</button>
+        <button id="ghostCloseBtn" class="btn small" type="button">닫기</button>
+      </div>
+    </div>
+  </aside>
+
+  <div id="futurePanel" class="future-panel hidden">
+    <div class="future-head">본다 <span id="futureRank"></span></div>
+    <div id="futureLine" class="future-line"></div>
+    <div id="futureScore" class="future-score"></div>
+    <div class="future-actions">
+      <button id="futurePlayBtn" class="btn primary small" type="button">여기에 둔다</button>
+      <button id="futureCancelBtn" class="btn small" type="button">취소</button>
+    </div>
+  </div>
+
+  <!-- 타이틀 -->
+  <div id="titleScreen" class="title-screen hidden">
+    <div class="title-fog"></div>
+    <div class="title-inner">
+      <p class="title-kicker">PARKSY GO · STORY BADUK</p>
+      <h1>귀신의<br><span>한 수</span></h1>
+      <p class="title-tagline">바둑을 두다, 귀신에게 묻다.</p>
+      <div class="title-actions">
+        <button id="startStoryBtn" class="btn primary big" type="button">이야기 시작</button>
+        <button id="continueBtn" class="btn big" type="button">이어하기</button>
+        <button id="startFreeBtn" class="btn big" type="button">자유 대국</button>
+      </div>
+      <p class="title-note">WebGPU · 실시간 영향도 · 미래 시뮬레이션 · 온톨로지 361/684</p>
+    </div>
+  </div>
+
+  <!-- 장면 결과 -->
+  <div id="storyComplete" class="modal hidden">
+    <div class="modal-card">
+      <p id="completeKicker" class="modal-kicker"></p>
+      <h2 id="completeTitle"></h2>
+      <p id="completeText"></p>
+      <div class="modal-actions">
+        <button id="completeNextBtn" class="btn primary" type="button">다음 장면</button>
+        <button id="completeRetryBtn" class="btn" type="button">다시 도전</button>
+        <button id="completeTitleBtn" class="btn" type="button">타이틀로</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js?v=20261127i"></script>
 </body>
 </html>

@@ -96,11 +96,12 @@ export class GpuInfluence {
     return this.cache;
   }
 
-  _runGpu(board, size) {
+  _runGpu(board, size, extra) {
     const n = size * size;
     const c = this._ensure(size);
     const u32 = new Uint32Array(n);
     for (let i = 0; i < n; i++) u32[i] = board[i];
+    if (extra && extra.idx >= 0 && extra.idx < n) u32[extra.idx] = extra.color;
     this.device.queue.writeBuffer(c.boardBuf, 0, u32);
     this.device.queue.writeBuffer(c.uniformBuf, 0, new Uint32Array([n, size, 0, 0]));
     const enc = this.device.createCommandEncoder({ label: "go-influence-pass" });
@@ -121,21 +122,27 @@ export class GpuInfluence {
   /**
    * @param {Uint8Array} board
    * @param {number} size
+   * @param {{idx:number,color:number}=} extra 가상의 한 수를 얹은 판으로 계산
    * @returns {Promise<{values: Float32Array, ms: number, backend: string, dispatch: number}>}
    */
-  run(board, size) {
+  run(board, size, extra = null) {
     const p = this.chain.then(async () => {
       const t0 = performance.now();
       if (this.ok) {
         try {
-          const values = await this._runGpu(board, size);
+          const values = await this._runGpu(board, size, extra);
           return { values, ms: +(performance.now() - t0).toFixed(2), backend: "WebGPU compute", dispatch: Math.ceil((size * size) / 64) };
         } catch (e) {
           this.error = String(e?.message || e);
           this.ok = false;
         }
       }
-      const values = cpuInfluence(board, size);
+      let cpuBoard = board;
+      if (extra && extra.idx >= 0 && extra.idx < board.length) {
+        cpuBoard = board.slice();
+        cpuBoard[extra.idx] = extra.color;
+      }
+      const values = cpuInfluence(cpuBoard, size);
       return { values, ms: +(performance.now() - t0).toFixed(2), backend: "CPU fallback", dispatch: 0 };
     });
     this.chain = p.catch(() => {});

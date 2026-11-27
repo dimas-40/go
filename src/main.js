@@ -1,7 +1,8 @@
 // PARKSY GO — 부팅·그래프·대국 컨트롤러
+import { ACESFilmicToneMapping, PCFShadowMap, Vector3 } from "three";
 import { createGraph } from "./graph.js";
-import { GoEngine, BLACK, WHITE, EMPTY, coordName, opponent } from "./go-engine.js";
-import { chooseMove } from "./go-ai.js";
+import { GoEngine, BLACK, WHITE, EMPTY, coordName, coordIndex, opponent } from "./go-engine.js";
+import { chooseMove, candidateMoves, makeRng } from "./go-ai.js";
 import {
   buildOntologyGraph,
   boardWindow,
@@ -14,8 +15,49 @@ import {
 } from "./go-ontology.js";
 import { loadVulkanDevice, describeLoader } from "./vulkan-loader.js";
 import { createInfluence } from "./gpu-influence.js";
+import { createBoard3D } from "./board3d.js";
+import {
+  ALL_SCENES,
+  CHAPTERS,
+  createSceneEngine,
+  firstScene,
+  goalLabel,
+  isGoalMet,
+  nextScene,
+  sceneById,
+} from "./story.js";
+import {
+  captureSound,
+  futureSound,
+  ghostSound,
+  initAudio,
+  loseSound,
+  stoneSound,
+  winSound,
+} from "./audio.js";
 
 const $ = (id) => document.getElementById(id);
+
+// 타이틀 판 위의 전시 기보. 실제 대국 상태와 무관한 한 장면으로,
+// 흑과 백이 함께 놓인 목판을 첫 화면에서 보여 준다.
+const TITLE_SHOWCASE = (() => {
+  const at = (x, y) => y * 19 + x;
+  return [
+    { idx: at(15, 3), color: BLACK },  // Q16
+    { idx: at(15, 15), color: BLACK }, // Q4
+    { idx: at(16, 5), color: BLACK },  // R14
+    { idx: at(2, 13), color: BLACK },  // C6
+    { idx: at(9, 9), color: BLACK },   // K10
+    { idx: at(11, 9), color: BLACK },  // M10
+    { idx: at(3, 15), color: WHITE },  // D4
+    { idx: at(3, 3), color: WHITE },   // D16
+    { idx: at(16, 3), color: WHITE },  // R16
+    { idx: at(5, 16), color: WHITE },  // F3
+    { idx: at(10, 10), color: WHITE }, // L11
+    { idx: at(10, 8), color: WHITE },  // L9
+  ];
+})();
+const TITLE_SHOWCASE_LAST = 9 * 19 + 9;
 
 const els = {
   backendBadge: $("backendBadge"),
@@ -47,14 +89,55 @@ const els = {
   moveLog: $("moveLog"),
   gpuFacts: $("gpuFacts"),
   graph: $("graph"),
+  boardOverlay: $("boardOverlay"),
+  boardStatus: $("boardStatus"),
+  blackName: $("blackName"),
+  whiteName: $("whiteName"),
+  blackCaptures: $("blackCaptures"),
+  whiteCaptures: $("whiteCaptures"),
+  dashBlack: $("dashBlack"),
+  dashWhite: $("dashWhite"),
+  blackPlate: $("blackPlate"),
+  whitePlate: $("whitePlate"),
+  medallionStone: $("medallionStone"),
+  medallionText: $("medallionText"),
   bootOverlay: $("bootOverlay"),
   bootText: $("bootText"),
   banner: $("banner"),
+  askBtn: $("askBtn"),
+  futureBtn: $("futureBtn"),
+  titleBtn: $("titleBtn"),
+  storyHud: $("storyHud"),
+  storyChapter: $("storyChapter"),
+  storyGoal: $("storyGoal"),
+  storyExitBtn: $("storyExitBtn"),
+  ghostPanel: $("ghostPanel"),
+  ghostText: $("ghostText"),
+  ghostNextBtn: $("ghostNextBtn"),
+  ghostCloseBtn: $("ghostCloseBtn"),
+  futurePanel: $("futurePanel"),
+  futureRank: $("futureRank"),
+  futureLine: $("futureLine"),
+  futureScore: $("futureScore"),
+  futurePlayBtn: $("futurePlayBtn"),
+  futureCancelBtn: $("futureCancelBtn"),
+  titleScreen: $("titleScreen"),
+  startStoryBtn: $("startStoryBtn"),
+  continueBtn: $("continueBtn"),
+  startFreeBtn: $("startFreeBtn"),
+  storyComplete: $("storyComplete"),
+  completeKicker: $("completeKicker"),
+  completeTitle: $("completeTitle"),
+  completeText: $("completeText"),
+  completeNextBtn: $("completeNextBtn"),
+  completeRetryBtn: $("completeRetryBtn"),
+  completeTitleBtn: $("completeTitleBtn"),
 };
 
 const state = {
   engine: new GoEngine(19, { komi: 6.5 }),
   graph: null,
+  board3d: null,
   ontology: null,
   loader: null,
   influence: null,
@@ -81,6 +164,25 @@ const state = {
   lastAI: null,
   booted: false,
   toastTimer: 0,
+  story: null,
+  storyComplete: false,
+  storyFailed: false,
+  pendingNext: null,
+  storyScriptIndex: 0,
+  storyIntroIndex: 0,
+  hintIndex: 0,
+  lastPlayResult: null,
+  lastPlayWasHuman: false,
+  ghostQueue: [],
+  ghostTyping: 0,
+  ghostTimer: 0,
+  futureMode: false,
+  future: null,
+  futureSet: new Map(),
+  futureToken: 0,
+  progress: { completed: [] },
+  titleVisible: true,
+  modeBeforeStory: "ai",
 };
 
 const COLOR_NAME = { 1: "흑", 2: "백", 0: "무승부" };
@@ -119,6 +221,396 @@ function showBanner(html, bad = false) {
   els.banner.classList.remove("hidden");
 }
 
+// ══════════════════════════════════════════════════════════
+// 《귀신의 한 수》 — 타이틀 · 스토리 · 귀신 · 미래
+// ══════════════════════════════════════════════════════════
+const PROGRESS_KEY = "parksygo.progress.v1";
+
+function loadProgress() {
+  try {
+    const raw = localStorage.getItem(PROGRESS_KEY);
+    if (!raw) return;
+    const p = JSON.parse(raw);
+    if (p && Array.isArray(p.completed)) state.progress = { completed: p.completed.filter((x) => typeof x === "string") };
+  } catch (e) { /* 저장소가 없어도 게임은 돈다 */ }
+}
+
+function saveProgress() {
+  try {
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify({ completed: state.progress.completed, updated: new Date().toISOString() }));
+  } catch (e) { /* noop */ }
+}
+
+function completedScene(id) {
+  return state.progress.completed.includes(id);
+}
+
+function markCompleted(id) {
+  if (!completedScene(id)) state.progress.completed.push(id);
+  saveProgress();
+  updateContinueButton();
+}
+
+function nextUnfinishedScene() {
+  return ALL_SCENES.find((s) => !completedScene(s.id)) || null;
+}
+
+function updateContinueButton() {
+  if (!state.progress.completed.length) {
+    els.continueBtn.classList.add("hidden");
+    els.continueBtn.textContent = "이어하기";
+    return;
+  }
+  const left = nextUnfinishedScene();
+  els.continueBtn.classList.remove("hidden");
+  if (!left) {
+    els.continueBtn.textContent = "다시 보기";
+    return;
+  }
+  els.continueBtn.textContent = `이어하기 · ${left.no} ${left.title}`;
+}
+
+function clearFuture(restyle = true) {
+  state.futureToken++;
+  state.future = null;
+  state.futureSet = new Map();
+  els.futurePanel.classList.add("hidden");
+  syncBoard3D();
+  if (restyle && state.graph) state.graph.restyle();
+}
+
+function setFutureMode(on) {
+  state.futureMode = !!on;
+  document.body.classList.toggle("future-mode", state.futureMode);
+  els.futureBtn.setAttribute("aria-pressed", state.futureMode ? "true" : "false");
+  if (!state.futureMode) {
+    clearFuture();
+  } else {
+    ghostSpeak("어디에 둘지 상상해 봐. 빈 교점을 누르면 세 수 앞을 보여 줄게.");
+    futureSound();
+  }
+}
+
+function resetTransient() {
+  state.requestId++;
+  state.aiThinking = false;
+  state.moveLog = [];
+  state.selected = null;
+  state.selectedSet = new Set();
+  state.lastAI = null;
+  state.lastPlayResult = null;
+  state.lastPlayWasHuman = false;
+  state.influenceMap = null;
+  state.influenceInfo = null;
+  state.influenceToken++;
+  state.territoryOwner = null;
+  clearFuture(false);
+  state.futureMode = false;
+  document.body.classList.remove("future-mode");
+  els.futureBtn.setAttribute("aria-pressed", "false");
+}
+
+function startTitle() {
+  initAudio();
+  state.titleVisible = true;
+  state.story = null;
+  state.storyComplete = false;
+  state.storyFailed = false;
+  state.pendingNext = null;
+  state.storyScriptIndex = 0;
+  state.storyIntroIndex = 0;
+  state.hintIndex = 0;
+  state.engine = new GoEngine(19, { komi: 6.5, rules: "chinese", superko: true });
+  state.mode = "local";
+  state.humanColor = BLACK;
+  state.scoring = "area";
+  resetTransient();
+  ghostClose();
+  els.storyHud.classList.add("hidden");
+  els.storyComplete.classList.add("hidden");
+  els.titleScreen.classList.remove("hidden");
+  document.body.classList.add("title-mode");
+  document.body.classList.remove("story-mode");
+  document.body.classList.remove("future-mode");
+  updateContinueButton();
+  refreshBoardState();
+  updateUI();
+  setShowcase(false);
+  fitTitleBoard(900);
+}
+
+function startFreeMode() {
+  initAudio();
+  state.titleVisible = false;
+  state.story = null;
+  state.storyComplete = false;
+  state.storyFailed = false;
+  state.pendingNext = null;
+  els.titleScreen.classList.add("hidden");
+  els.storyHud.classList.add("hidden");
+  els.storyComplete.classList.add("hidden");
+  ghostClose();
+  document.body.classList.remove("title-mode", "story-mode", "future-mode");
+  setShowcase(false);
+  clearFuture();
+  newGame();
+  showToast("자유 대국입니다. 좌하단 '묻는다'로 힌트를 들어 보세요.");
+}
+
+function loadStoryScene(scene) {
+  if (!scene) return;
+  initAudio();
+  state.titleVisible = false;
+  state.story = scene;
+  state.storyComplete = false;
+  state.storyFailed = false;
+  state.pendingNext = null;
+  state.storyScriptIndex = 0;
+  state.storyIntroIndex = 0;
+  state.hintIndex = 0;
+  state.engine = createSceneEngine(scene);
+  state.humanColor = BLACK;
+  state.mode = scene.opponent?.kind === "none" ? "local" : "ai";
+  state.aiLevel = scene.opponent?.level || "easy";
+  state.scoring = "area";
+  resetTransient();
+  state.story = scene;
+  els.sizeSelect.value = String(scene.size);
+  els.humanSelect.value = "1";
+  els.modeSelect.value = state.mode === "local" ? "local" : "ai";
+  els.levelSelect.value = state.aiLevel;
+  els.komiInput.value = String(scene.komi ?? 6.5);
+  els.scoreSelect.value = "area";
+  els.storyChapter.textContent = `${scene.chapter?.no || "제1장"} · ${scene.chapter?.title || ""} — ${scene.no} ${scene.title}`;
+  els.storyGoal.textContent = goalLabel(scene);
+  els.storyHud.classList.remove("hidden");
+  els.titleScreen.classList.add("hidden");
+  els.storyComplete.classList.add("hidden");
+  document.body.classList.remove("title-mode");
+  document.body.classList.add("story-mode");
+  document.body.classList.remove("future-mode");
+  setShowcase(false);
+  refreshBoardState();
+  updateUI();
+  fitBoard(820);
+  ghostQueue(scene.intro || []);
+  if (state.influenceOn) refreshInfluence();
+}
+
+function ghostQueue(lines) {
+  state.ghostQueue = (lines || []).filter((x) => typeof x === "string" && x.length);
+  state.ghostTimer = 0;
+  ghostNext();
+}
+
+function ghostSpeak(text) {
+  state.ghostQueue = [text];
+  ghostNext();
+}
+
+function ghostNext() {
+  const line = state.ghostQueue.shift();
+  if (!line) {
+    els.ghostNextBtn.classList.add("hidden");
+    return;
+  }
+  els.ghostPanel.classList.remove("hidden");
+  els.ghostNextBtn.classList.toggle("hidden", state.ghostQueue.length === 0);
+  ghostSound();
+  clearInterval(state.ghostTimer);
+  state.ghostTyping++;
+  const token = state.ghostTyping;
+  const text = line;
+  let i = 0;
+  els.ghostText.textContent = "";
+  els.ghostText.classList.add("typing");
+  state.ghostTimer = setInterval(() => {
+    if (token !== state.ghostTyping) return clearInterval(state.ghostTimer);
+    i += 1;
+    els.ghostText.textContent = text.slice(0, i);
+    if (i >= text.length) {
+      clearInterval(state.ghostTimer);
+      els.ghostText.classList.remove("typing");
+    }
+  }, 22);
+  if (text.length === 0) els.ghostText.classList.remove("typing");
+}
+
+function ghostClose() {
+  state.ghostTyping++;
+  clearInterval(state.ghostTimer);
+  state.ghostQueue = [];
+  els.ghostPanel.classList.add("hidden");
+}
+
+function askHint() {
+  if (!state.story) {
+    const rng = makeRng((Date.now() ^ 0x9e3779b9) >>> 0);
+    const cands = candidateMoves(state.engine, rng);
+    if (cands.length) {
+      const c = cands[0];
+      ghostSpeak(`지금은 ${c.coord || coordName(c.stone, state.engine.size)} 부근이 좋아 보여. 이유는 활로 ${c.liberties}개, 따냄 ${c.captured}개.`);
+    } else {
+      ghostSpeak("지금은 둘 곳이 마땅치 않아. 패스도 한 수야.");
+    }
+    return;
+  }
+  const hints = state.story.hints || [];
+  if (!hints.length) return ghostSpeak("이 장면에는 더 말해 줄 게 없어. 네 직감을 믿어.");
+  const idx = Math.min(state.hintIndex, hints.length - 1);
+  state.hintIndex = Math.min(state.hintIndex + 1, hints.length);
+  ghostSpeak(hints[idx]);
+}
+
+function finishStory(success) {
+  if (!state.story || state.storyComplete || state.storyFailed) return;
+  state.requestId++;
+  state.aiThinking = false;
+  const scene = state.story;
+  state.futureMode = false;
+  document.body.classList.remove("future-mode");
+  clearFuture();
+  if (success) {
+    state.storyComplete = true;
+    state.storyFailed = false;
+    markCompleted(scene.id);
+    state.pendingNext = nextScene(scene.id);
+    winSound();
+    const line = scene.after?.[0] || "좋은 수였어.";
+    ghostSpeak(line);
+    els.completeKicker.textContent = "장면 완료";
+    els.completeTitle.textContent = `${scene.no} · ${scene.title}`;
+    els.completeText.textContent = state.pendingNext
+      ? `${line} 다음 장면에서 한 걸음 더 가 보자.`
+      : `${line} 제1장이 끝났어. 이제 자유 대국에서도 같은 눈을 써 봐.`;
+    els.completeNextBtn.classList.remove("hidden");
+    els.completeNextBtn.textContent = state.pendingNext ? "다음 장면" : "자유 대국으로";
+    els.completeRetryBtn.classList.add("hidden");
+    els.completeTitleBtn.classList.remove("hidden");
+  } else {
+    state.storyComplete = false;
+    state.storyFailed = true;
+    state.pendingNext = null;
+    loseSound();
+    ghostSpeak("아직이야. 마지막 수를 기억해. 다시 두면 돼.");
+    els.completeKicker.textContent = "패배";
+    els.completeTitle.textContent = "아직, 끝이 아니야";
+    els.completeText.textContent = "귀신은 지는 법도 가르쳐. 방금 만든 네 집과 잃은 집을 떠올려 봐. 같은 판을 다시 둘 수 있어.";
+    els.completeNextBtn.classList.add("hidden");
+    els.completeRetryBtn.classList.remove("hidden");
+    els.completeTitleBtn.classList.remove("hidden");
+  }
+  els.storyComplete.classList.remove("hidden");
+  updateUI();
+}
+
+function checkStoryGoal() {
+  if (!state.story || state.storyComplete || state.storyFailed) return false;
+  const scene = state.story;
+  const e = state.engine;
+  if (scene.goal?.type === "win") {
+    if (!e.gameOver) return false;
+    finishStory(e.result?.winner === state.humanColor);
+    return true;
+  }
+  if (state.lastPlayWasHuman && isGoalMet(scene, e, state.lastPlayResult, state.humanColor)) {
+    finishStory(true);
+    return true;
+  }
+  if (e.gameOver) {
+    finishStory(e.result?.winner === state.humanColor);
+    return true;
+  }
+  return false;
+}
+
+function pickHeuristicMove(e) {
+  const rng = makeRng((e.moveNumber * 2654435761 ^ 0x85ebca6b) >>> 0);
+  const cands = candidateMoves(e, rng);
+  if (cands.length) return cands[0].stone;
+  const legal = e.legalMoves({ fast: true });
+  return legal.length ? legal[0] : null;
+}
+
+function previewFuture(idx) {
+  const e = state.engine;
+  if (!isHumanTurn()) return showToast("지금은 네 차례가 아닙니다.", true);
+  if (e.board[idx] !== EMPTY) return showToast("빈 교점을 골라 주세요.", true);
+  if (!e.isLegal(idx, { fast: false })) return showToast("그 자리에는 둘 수 없습니다.", true);
+  const color = e.turn;
+  const sim = e.cloneFast();
+  const r = sim.playFast(idx);
+  if (!r.ok) return showToast("그 자리에는 둘 수 없습니다.", true);
+  const line = [{ idx, color, n: 1 }];
+  const rng = makeRng((idx * 2654435761 ^ e.moveNumber) >>> 0);
+  for (let p = 0; p < 2; p++) {
+    const candidates = candidateMoves(sim, rng);
+    let move = candidates.length ? candidates[0].stone : null;
+    if (move === null) {
+      const legal = sim.legalMoves({ fast: true });
+      move = legal.length ? legal[0] : null;
+    }
+    if (move === null) break;
+    const c = sim.turn;
+    const rr = sim.playFast(move);
+    if (!rr.ok) break;
+    line.push({ idx: move, color: c, n: p + 2 });
+  }
+  const before = e.score("area");
+  const after = sim.score("area");
+  const rng2 = makeRng((e.moveNumber * 2246822519 ^ 0x27d4eb2f) >>> 0);
+  const cands = candidateMoves(e, rng2);
+  const rank = cands.findIndex((c) => c.stone === idx) + 1;
+  const token = ++state.futureToken;
+  state.future = { candidate: idx, line, before, after, rank, total: cands.length, gpu: null };
+  state.futureSet = new Map(line.map((m) => [m.idx, m.color]));
+  syncBoard3D();
+  renderFuturePanel();
+  if (state.graph) state.graph.restyle();
+  futureSound();
+  if (state.influence) {
+    state.influence.run(e.board, e.size, { idx, color }).then((info) => {
+      if (token !== state.futureToken || !state.future) return;
+      state.future.gpu = info;
+      renderFuturePanel();
+      renderGpuFacts();
+    }).catch(() => {});
+  }
+}
+
+function diffLabel(d) {
+  const v = Number(d) || 0;
+  return `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+}
+
+function renderFuturePanel() {
+  const f = state.future;
+  if (!f) {
+    els.futurePanel.classList.add("hidden");
+    return;
+  }
+  const e = state.engine;
+  els.futurePanel.classList.remove("hidden");
+  els.futureRank.textContent = f.rank > 0 ? `추천 ${f.rank}/${f.total}` : "후보 밖";
+  els.futureLine.innerHTML = f.line
+    .map((m) => `<span class="mv ${m.color === BLACK ? "black" : "white"}"><i></i>${m.n}. <b>${coordName(m.idx, e.size)}</b></span>`)
+    .join("");
+  const delta = f.after.diff - f.before.diff;
+  const humanAfter = state.humanColor === BLACK ? f.after.diff : -f.after.diff;
+  const humanBefore = state.humanColor === BLACK ? f.before.diff : -f.before.diff;
+  const gpu = f.gpu ? `${f.gpu.backend} · ${f.gpu.ms} ms` : "계산 중…";
+  els.futureScore.innerHTML =
+    `지금 형세 <b>${diffLabel(humanBefore)}</b> → 세 수 뒤 <b>${diffLabel(humanAfter)}</b><br>` +
+    `변화 <b>${diffLabel(state.humanColor === BLACK ? delta : -delta)}</b> · GPU 영향도 <span>${gpu}</span>`;
+}
+
+function confirmFuture() {
+  if (!state.future) return;
+  const idx = state.future.candidate;
+  setFutureMode(false);
+  playHuman(idx);
+}
+
 function fmtBytes(n) {
   if (!Number.isFinite(n)) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -147,6 +639,20 @@ function aiColor() {
   return opponent(state.humanColor);
 }
 
+function syncBoard3D() {
+  if (!state.board3d) return;
+  const e = state.engine;
+  state.board3d.sync({
+    board: e.board,
+    size: e.size,
+    lastMove: e.lastMove,
+    selected: state.selected?.idx ?? null,
+    future: state.future,
+    showcase: state.titleVisible ? TITLE_SHOWCASE : null,
+    showcaseLast: state.titleVisible ? TITLE_SHOWCASE_LAST : null,
+  });
+}
+
 function refreshBoardState() {
   const e = state.engine;
   state.groups = e.groups();
@@ -159,6 +665,7 @@ function refreshBoardState() {
   state.territoryOwner = state.territoryOn ? e.territory() : null;
   state.legalCount = e.gameOver ? 0 : e.legalMoves({ fast: true }).length;
   state.selectedSet = new Set(state.selected?.group?.stones || []);
+  syncBoard3D();
 }
 
 function nodeContext(n) {
@@ -180,6 +687,23 @@ function nodeStyle(n) {
   const selected = state.selectedSet.has(idx);
   const last = e.lastMove === idx;
   const atari = state.atariStones.has(idx);
+  const fm = state.future?.line?.find((m) => m.idx === idx);
+  if (fm) {
+    const ghostBlack = fm.color === BLACK;
+    const isCandidate = state.future?.candidate === idx;
+    if (state.board3d) {
+      // 미래 수는 3D 반투명 돌로 그린다. 그래프 노드는 후보만 작게 숨 쉰다.
+      return isCandidate
+        ? { color: "#eafff8", alpha: 0.32, size: 7.5, hot: true }
+        : { color: "#7de2ff", alpha: 0, size: 0, hot: false };
+    }
+    return {
+      color: isCandidate ? "#ffffff" : ghostBlack ? "#7de2ff" : "#ffb7e8",
+      alpha: isCandidate ? 0.98 : 0.78,
+      size: isCandidate ? 8.2 : 15.5,
+      hot: isCandidate,
+    };
+  }
   let color = "#2bd6b0";
   let alpha = 0.2;
   let sizePx = 3.2;
@@ -188,12 +712,22 @@ function nodeStyle(n) {
     color = selected ? "#a8d4ff" : last ? "#bfe1ff" : "#4aa8ff";
     alpha = 0.95;
     sizePx = selected ? 21.5 : last ? 20 : 17.5;
+    if (state.board3d) {
+      return atari
+        ? { color: "#ff5a5a", alpha: 0.5, size: 27, hot: true }
+        : { color, alpha: 0, size: 0, hot: false };
+    }
     return { color, alpha, size: sizePx, hot: atari };
   }
   if (stone === WHITE) {
     color = selected ? "#ffe9b8" : last ? "#ffe9b8" : "#ffcf6a";
     alpha = 0.95;
     sizePx = selected ? 21.5 : last ? 20 : 17.5;
+    if (state.board3d) {
+      return atari
+        ? { color: "#ff5a5a", alpha: 0.5, size: 27, hot: true }
+        : { color, alpha: 0, size: 0, hot: false };
+    }
     return { color, alpha, size: sizePx, hot: atari };
   }
 
@@ -205,6 +739,7 @@ function nodeStyle(n) {
     sizePx = 4.4;
   }
   const terr = state.territoryOn && state.territoryOwner ? state.territoryOwner[idx] : 0;
+  let infShown = false;
   if (terr === BLACK) {
     color = "#5c8fc9";
     alpha = 0.4;
@@ -218,6 +753,7 @@ function nodeStyle(n) {
     const inf = state.influenceMap[idx] || 0;
     const t = Math.sign(inf) * Math.tanh(Math.sqrt(Math.abs(inf)) / 1.2);
     if (Math.abs(t) > 0.012) {
+      infShown = true;
       color = t > 0 ? "#4aa8ff" : "#ffcf6a";
       alpha = 0.1 + 0.4 * Math.abs(t);
       sizePx = 2.6 + 3.8 * Math.abs(t);
@@ -241,6 +777,9 @@ function nodeStyle(n) {
     alpha = 0.95;
     sizePx = 5.6;
   }
+  if (state.board3d && !(selected || e.ko === idx || terr || infShown)) {
+    return { color, alpha: 0, size: 0, hot: false };
+  }
   return { color, alpha, size: sizePx, hot: false };
 }
 
@@ -256,6 +795,8 @@ function nodeLabel(n) {
   if (c === BLACK) text += " · 흑";
   else if (c === WHITE) text += " · 백";
   else text += " · 빈 교점";
+  const fm = state.future?.line?.find((m) => m.idx === idx);
+  if (fm) text += ` · <span style='color:#c9b8ff'>미래 ${fm.n}수 ${fm.color === BLACK ? "흑" : "백"}</span>`;
   if (c) {
     const g = state.stoneGroup.get(idx);
     if (g) {
@@ -297,9 +838,17 @@ function linkStyle(l) {
     };
   }
   if ((e.lastMove === a.idx || e.lastMove === b.idx) && aStone + bStone > 0) {
-    return { visible: true, color: "#2bd6b0", alpha: 0.45, width: 0.5, particles: 0 };
+    return { visible: true, color: "#2bd6b0", alpha: 0.4, width: 0.45, particles: 0 };
   }
+  if (state.board3d) return { visible: false, color: "#2bd6b0", alpha: 0, width: 0, particles: 0 };
   return { visible: true, color: "#1fb9a4", alpha: 0.3, width: 0.2, particles: 0 };
+}
+
+function setShowcase(on) {
+  const c = state.graph?.controls?.();
+  if (!c) return;
+  c.autoRotate = !!on;
+  c.autoRotateSpeed = 0.32;
 }
 
 function fitBoard(ms = 700) {
@@ -307,14 +856,126 @@ function fitBoard(ms = 700) {
   const size = state.engine.size;
   const r = els.graph.getBoundingClientRect();
   const aspect = (r.width || 1) / (r.height || 1);
-  const half = ((size - 1) * SPACING) / 2 + SPACING * 0.9;
+  const half = state.board3d?.halfFor(size) ?? ((size - 1) * SPACING) / 2 + SPACING * 0.9;
   const fovDeg = state.graph.camera?.()?.fov || 42;
   const fov = (fovDeg * Math.PI) / 180;
-  let dist = half / Math.tan(fov / 2);
-  if (aspect < 1) dist *= 1.12;
+  // 자유 대국은 옆 패널과 함께 보이므로 판을 조금 더 크게 채운다.
+  const fit = state.story || state.titleVisible ? 1.36 : 1.24;
+  let dist = (half * fit) / Math.tan(fov / 2);
+  if (aspect < 1) dist *= 1 / Math.max(aspect, 0.66);
+  dist += 30;
+  state.graph.resize();
+  // 3/4 시점. 왼쪽 모서리와 앞 두께가 함께 보여 '판 위에 놓인 나무'로 읽힌다.
+  state.graph.cameraPosition(
+    { x: -dist * 0.18, y: -dist * 0.3, z: dist * 0.95 },
+    { x: 0, y: -30, z: -6 },
+    ms,
+  );
+  updateBoardOverlay();
+}
+
+// 타이틀 전용 히어로 시점. 상판이 아니라 판의 두께와 옆면까지 보이도록
+// 낮게 앉혀, 나무 한 덩어리 위에 놓인 돌이라는 인상을 만든다.
+function fitTitleBoard(ms = 900) {
+  if (!state.graph) return;
+  const size = state.engine.size;
+  const r = els.graph.getBoundingClientRect();
+  const aspect = (r.width || 1) / (r.height || 1);
+  const half = state.board3d?.halfFor(size) ?? ((size - 1) * SPACING) / 2 + SPACING * 0.9;
+  const fovDeg = state.graph.camera?.()?.fov || 42;
+  const fov = (fovDeg * Math.PI) / 180;
+  let dist = (half * 1.62) / Math.tan(fov / 2);
+  if (aspect < 1) dist *= 1 / Math.max(aspect, 0.66);
   dist += 40;
   state.graph.resize();
-  state.graph.cameraPosition({ x: 0, y: 0, z: dist }, { x: 0, y: 0, z: 0 }, ms);
+  state.graph.cameraPosition(
+    { x: -dist * 0.3, y: -dist * 0.52, z: dist * 0.7 },
+    { x: -half * 0.3, y: -half * 0.08, z: -8 },
+    ms,
+  );
+}
+
+// 그래프 캔버스와 같은 카메라로 바둑판 격자를 SVG에 투영한다.
+// WebGPU/WebGL 양쪽에서 보드가 '점'이 아니라 '판'으로 읽히게 하는 최소 장치.
+const SVG_NS = "http://www.w3.org/2000/svg";
+let overlaySize = 0;
+let overlayDefs = [];
+let overlayFrame = null;
+const overlayV = new Vector3();
+
+function ensureBoardOverlay() {
+  const size = state.engine.size;
+  if (overlaySize === size || !els.boardOverlay) return;
+  overlaySize = size;
+  els.boardOverlay.replaceChildren();
+  overlayDefs = [];
+  overlayFrame = document.createElementNS(SVG_NS, "rect");
+  overlayFrame.setAttribute("class", "frame");
+  overlayFrame.setAttribute("fill", "none");
+  overlayFrame.setAttribute("stroke", "rgba(224,176,112,0.32)");
+  overlayFrame.setAttribute("stroke-width", "1.4");
+  els.boardOverlay.append(overlayFrame);
+
+  const add = (ax, ay, bx, by, frame) => {
+    const line = document.createElementNS(SVG_NS, "line");
+    if (frame) line.setAttribute("class", "frame");
+    els.boardOverlay.append(line);
+    overlayDefs.push({
+      line,
+      a: graphIndexForEngine(size, ay * size + ax),
+      b: graphIndexForEngine(size, by * size + bx),
+    });
+  };
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size - 1; x++) add(x, y, x + 1, y, y === 0 || y === size - 1);
+  }
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size - 1; y++) add(x, y, x, y + 1, x === 0 || x === size - 1);
+  }
+}
+
+function projectBoardNode(node, cam, rect) {
+  overlayV.set(node.x || 0, node.y || 0, node.z || 0).project(cam);
+  return {
+    x: (overlayV.x * 0.5 + 0.5) * rect.width,
+    y: (-overlayV.y * 0.5 + 0.5) * rect.height,
+  };
+}
+
+function updateBoardOverlay() {
+  if (state.board3d) return;
+  if (!state.graph || !state.ontology || !els.boardOverlay) return;
+  ensureBoardOverlay();
+  if (!overlayDefs.length) return;
+  const cam = state.graph.camera();
+  const rect = els.graph.getBoundingClientRect();
+  if (!cam || rect.width < 2 || rect.height < 2) return;
+  cam.updateMatrixWorld();
+  if (cam.updateProjectionMatrix) cam.updateProjectionMatrix();
+  const nodes = state.graph.graphData?.().nodes || state.ontology.nodes;
+  for (const d of overlayDefs) {
+    const a = nodes[d.a], b = nodes[d.b];
+    if (!a || !b) continue;
+    const pa = projectBoardNode(a, cam, rect);
+    const pb = projectBoardNode(b, cam, rect);
+    d.line.setAttribute("x1", pa.x.toFixed(2));
+    d.line.setAttribute("y1", pa.y.toFixed(2));
+    d.line.setAttribute("x2", pb.x.toFixed(2));
+    d.line.setAttribute("y2", pb.y.toFixed(2));
+  }
+  const size = state.engine.size;
+  const corners = [0, size - 1, size * (size - 1), size * size - 1]
+    .map((idx) => nodes[graphIndexForEngine(size, idx)])
+    .filter(Boolean)
+    .map((n) => projectBoardNode(n, cam, rect));
+  if (corners.length && overlayFrame) {
+    const xs = corners.map((p) => p.x);
+    const ys = corners.map((p) => p.y);
+    overlayFrame.setAttribute("x", Math.min(...xs).toFixed(2));
+    overlayFrame.setAttribute("y", Math.min(...ys).toFixed(2));
+    overlayFrame.setAttribute("width", (Math.max(...xs) - Math.min(...xs)).toFixed(2));
+    overlayFrame.setAttribute("height", (Math.max(...ys) - Math.min(...ys)).toFixed(2));
+  }
 }
 
 function selectStone(idx) {
@@ -323,6 +984,7 @@ function selectStone(idx) {
   state.selected = { type: "stone", idx, group: g };
   state.selectedSet = new Set(g.stones);
   renderGroupFacts();
+  syncBoard3D();
   if (state.graph) state.graph.restyle();
 }
 
@@ -330,6 +992,7 @@ function selectEmpty(idx) {
   state.selected = { type: "empty", idx };
   state.selectedSet = new Set([idx]);
   renderGroupFacts();
+  syncBoard3D();
   if (state.graph) state.graph.restyle();
 }
 
@@ -337,6 +1000,7 @@ function clearSelection() {
   state.selected = null;
   state.selectedSet = new Set();
   renderGroupFacts();
+  syncBoard3D();
   if (state.graph) state.graph.restyle();
 }
 
@@ -349,6 +1013,8 @@ function logPlay(res) {
     coord: coordName(res.idx, state.engine.size),
     captured: res.captured.length,
   });
+  if (res.captured.length) captureSound(res.captured.length);
+  else stoneSound();
 }
 
 function logPass(res) {
@@ -374,6 +1040,9 @@ function playHuman(idx) {
     return;
   }
   state.requestId++;
+  state.lastPlayResult = res;
+  state.lastPlayWasHuman = true;
+  clearFuture(false);
   logPlay(res);
   afterMove();
 }
@@ -381,6 +1050,7 @@ function playHuman(idx) {
 function afterMove() {
   state.selected = null;
   state.selectedSet = new Set();
+  clearFuture(false);
   refreshBoardState();
   const e = state.engine;
   if (state.graph && e.lastMove !== null && e.lastMove !== undefined) {
@@ -389,6 +1059,9 @@ function afterMove() {
   }
   updateUI();
   if (state.influenceOn) refreshInfluence();
+  if (state.story) {
+    if (checkStoryGoal()) return;
+  }
   if (!e.gameOver) setTimeout(() => maybeAI(), 140);
 }
 
@@ -398,6 +1071,42 @@ function maybeAI() {
   if (e.turn !== aiColor()) return;
   state.aiThinking = true;
   const id = ++state.requestId;
+
+  // 스토리 장면의 상대는 대본대로 둔다. 대본이 막히면 AI로 넘어간다.
+  if (state.story?.opponent?.kind === "scripted") {
+    updateUI();
+    setTimeout(() => {
+      if (id !== state.requestId || !state.story || state.engine !== e || e.gameOver) {
+        state.aiThinking = false;
+        updateUI();
+        return;
+      }
+      const script = state.story.opponent.moves || [];
+      let res = null;
+      for (let k = state.storyScriptIndex; k < script.length; k++) {
+        const idx = coordIndex(script[k], e.size);
+        if (idx >= 0 && e.board[idx] === EMPTY && e.isLegal(idx, { fast: false })) {
+          state.storyScriptIndex = k + 1;
+          res = e.play(idx);
+          break;
+        }
+      }
+      if (!res || !res.ok) {
+        const fallback = pickHeuristicMove(e);
+        if (fallback !== null) res = e.play(fallback);
+      }
+      state.aiThinking = false;
+      if (res?.ok) {
+        state.lastPlayResult = res;
+        state.lastPlayWasHuman = false;
+        state.lastAI = { reason: "scripted", elapsed: 0 };
+        logPlay(res);
+      }
+      afterMove();
+    }, 520);
+    return;
+  }
+
   const snapshot = e.serialize();
   const opts = { level: state.aiLevel, seed: (Date.now() ^ (e.moveNumber * 2654435761)) >>> 0 };
   updateUI();
@@ -437,6 +1146,8 @@ function applyAIResult(id, result) {
     const res = e.pass();
     if (res.ok) logPass(res);
     state.lastAI = result;
+    state.lastPlayResult = res.ok ? res : null;
+    state.lastPlayWasHuman = false;
     afterMove();
     return;
   }
@@ -444,20 +1155,25 @@ function applyAIResult(id, result) {
   if (!res.ok) {
     // 상태가 바뀌었거나 엔진이 거부한 경우 — 같은 상태에서 합법수로 대체
     const legal = e.legalMoves({ fast: true });
+    let altRes = null;
     if (legal.length) {
       const alt = e.play(legal[0]);
-      if (alt.ok) logPlay(alt);
+      if (alt.ok) { logPlay(alt); altRes = alt; }
     } else {
       const p = e.pass();
       if (p.ok) logPass(p);
     }
     state.lastAI = result;
+    state.lastPlayResult = altRes;
+    state.lastPlayWasHuman = false;
     showToast(`AI 수가 거부되어 대체했습니다 (${REASON_NAME[res.reason] || res.reason})`, true);
     afterMove();
     return;
   }
   logPlay(res);
   state.lastAI = result;
+  state.lastPlayResult = res;
+  state.lastPlayWasHuman = false;
   afterMove();
 }
 
@@ -502,6 +1218,8 @@ function passTurn() {
   const res = e.pass();
   if (!res.ok) return showToast(REASON_NAME[res.reason] || res.reason, true);
   state.requestId++;
+  state.lastPlayResult = res;
+  state.lastPlayWasHuman = true;
   logPass(res);
   afterMove();
 }
@@ -516,8 +1234,11 @@ function resignGame() {
   state.aiThinking = false;
   state.selected = null;
   state.selectedSet = new Set();
+  state.lastPlayResult = res;
+  state.lastPlayWasHuman = true;
   updateUI();
   if (state.influenceOn) refreshInfluence();
+  if (state.story && !state.storyComplete && !state.storyFailed) checkStoryGoal();
 }
 
 function newGame() {
@@ -530,16 +1251,18 @@ function newGame() {
   state.mode = mode;
   state.aiLevel = els.levelSelect.value || "normal";
   state.scoring = els.scoreSelect.value === "territory" ? "territory" : "area";
-  state.requestId++;
-  state.aiThinking = false;
-  state.moveLog = [];
-  state.selected = null;
-  state.selectedSet = new Set();
-  state.lastAI = null;
-  state.influenceMap = null;
-  state.influenceInfo = null;
-  state.influenceToken++;
-  state.territoryOwner = null;
+  state.story = null;
+  state.storyComplete = false;
+  state.storyFailed = false;
+  state.pendingNext = null;
+  state.titleVisible = false;
+  state.hintIndex = 0;
+  resetTransient();
+  els.storyHud.classList.add("hidden");
+  els.storyComplete.classList.add("hidden");
+  els.titleScreen.classList.add("hidden");
+  els.ghostPanel.classList.add("hidden");
+  document.body.classList.remove("title-mode", "story-mode");
   refreshBoardState();
   updateUI();
   showBanner("");
@@ -567,6 +1290,46 @@ async function refreshInfluence() {
   renderGpuFacts();
 }
 
+function renderMatchHUD() {
+  const e = state.engine;
+  const human = state.humanColor;
+  const story = state.story;
+  if (els.dashBlack) {
+    els.dashBlack.textContent = String(e.captures?.[BLACK] ?? 0);
+    els.dashWhite.textContent = String(e.captures?.[WHITE] ?? 0);
+  }
+  if (els.blackName) {
+    els.blackName.textContent = story
+      ? human === BLACK ? "나 · 흑" : "묵 · 흑"
+      : "흑";
+    els.whiteName.textContent = story
+      ? human === WHITE ? "나 · 백" : "묵 · 백"
+      : "백";
+    els.blackCaptures.textContent = String(e.captures?.[BLACK] ?? 0);
+    els.whiteCaptures.textContent = String(e.captures?.[WHITE] ?? 0);
+    els.blackPlate?.classList.toggle("active", !e.gameOver && e.turn === BLACK);
+    els.whitePlate?.classList.toggle("active", !e.gameOver && e.turn === WHITE);
+    els.blackPlate?.classList.toggle("mine", state.mode === "ai" && human === BLACK);
+    els.whitePlate?.classList.toggle("mine", state.mode === "ai" && human === WHITE);
+    if (els.boardStatus) {
+      const last = e.lastMove !== null && e.lastMove !== undefined ? coordName(e.lastMove, e.size) : "—";
+      const head = story ? `${story.chapter?.no || "제1장"} · ${story.no}` : "자유 대국";
+      els.boardStatus.textContent = `${head} · ${e.size}줄 · ${e.moveNumber}수 · 최근 ${last}`;
+    }
+    if (els.medallionStone) {
+      els.medallionStone.className = `medallion-stone ${e.turn === WHITE ? "white" : "black"}`;
+      els.medallionText.textContent = e.gameOver
+        ? "終"
+        : state.aiThinking
+          ? "읽는 중"
+          : isHumanTurn()
+            ? "착수"
+            : "묵…";
+    }
+    document.body.classList.toggle("ai-turn", !e.gameOver && !isHumanTurn() && state.mode === "ai");
+  }
+}
+
 function updateUI() {
   const e = state.engine;
   els.turnDot.className = `dot ${e.turn === WHITE ? "white" : "black"}`;
@@ -579,24 +1342,41 @@ function updateUI() {
   els.undoBtn.disabled = !canUndo();
   els.influenceBtn.setAttribute("aria-pressed", state.influenceOn ? "true" : "false");
   els.territoryBtn.setAttribute("aria-pressed", state.territoryOn ? "true" : "false");
+  els.futureBtn.setAttribute("aria-pressed", state.futureMode ? "true" : "false");
+  els.askBtn.disabled = state.titleVisible;
+  els.futureBtn.disabled = state.titleVisible || !state.story && state.engine.gameOver;
+  if (state.story) {
+    els.storyGoal.textContent = goalLabel(state.story);
+    els.storyChapter.textContent = `${state.story.chapter?.no || "제1장"} · ${state.story.chapter?.title || ""} — ${state.story.no} ${state.story.title}`;
+  }
+  renderMatchHUD();
   renderScore();
   renderOntology();
   renderGroupFacts();
   renderAIFacts();
   renderMoves();
   renderGpuFacts();
+  syncBoard3D();
   if (state.graph) state.graph.restyle();
   if (e.gameOver) renderEndBanner();
   else showBanner("");
-  els.aiStatus.textContent = state.aiThinking
-    ? `AI가 플레이아웃을 돌리는 중 · ${state.aiLevel}`
-    : state.mode === "local"
-      ? "사람 vs 사람"
-      : e.gameOver
-        ? "대국 종료"
+  els.aiStatus.textContent = state.story
+    ? state.storyComplete
+      ? "장면 완료 — 귀신이 고개를 끄덕였습니다."
+      : state.aiThinking
+        ? "묵이 수를 읽는 중…"
         : isHumanTurn()
-          ? "내 차례입니다."
-          : "AI 차례입니다.";
+          ? "묵이 지켜보고 있습니다."
+          : "묵의 차례입니다."
+    : state.aiThinking
+      ? `AI가 플레이아웃을 돌리는 중 · ${state.aiLevel}`
+      : state.mode === "local"
+        ? "사람 vs 사람"
+        : e.gameOver
+          ? "대국 종료"
+          : isHumanTurn()
+            ? "내 차례입니다."
+            : "AI 차례입니다.";
 }
 
 function renderScore() {
@@ -799,6 +1579,10 @@ function renderGpuFacts(prefix) {
   } else {
     html += kv("영향도", state.influenceOn ? "계산 대기" : "꺼짐");
   }
+  if (state.future?.gpu) {
+    html += kv("미래 GPU", `${state.future.gpu.backend} · ${state.future.gpu.ms} ms`);
+    html += kv("미래 후보", coordName(state.future.candidate, state.engine.size));
+  }
   html += kv("Vulkan 표기", "Android/Linux는 Dawn→Vulkan, Windows는 D3D12, macOS는 Metal");
   els.gpuFacts.innerHTML = html;
 }
@@ -943,6 +1727,20 @@ async function boot() {
     state.graph = await setupGraph(data);
 
     const g = state.graph;
+    const renderer = g.renderer();
+    if (renderer) {
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = PCFShadowMap;
+      renderer.toneMapping = ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.95;
+    }
+    state.board3d = createBoard3D(g.scene(), {
+      renderer,
+      spacing: SPACING,
+      size: state.engine.size,
+    });
+    g.onFrame((dt, now) => state.board3d?.update(dt, now));
+    els.boardOverlay.style.display = "none";
     let loader;
     if (g.backend === "WebGPU") {
       loader = syntheticWebGpuLoader();
@@ -980,12 +1778,18 @@ async function boot() {
     g.linkAlpha((l) => linkStyle(l).alpha);
     g.linkWidth((l) => linkStyle(l).width);
     g.linkDirectionalParticles((l) => linkStyle(l).particles);
+    syncBoard3D();
 
     g.onNodeClick((n) => {
+      if (state.titleVisible) return;
       const ctx = nodeContext(n);
       if (!ctx) return;
       if (state.engine.board[ctx.idx] !== EMPTY) {
         selectStone(ctx.idx);
+        return;
+      }
+      if (state.futureMode) {
+        previewFuture(ctx.idx);
         return;
       }
       if (isGameOver()) return selectEmpty(ctx.idx);
@@ -996,7 +1800,10 @@ async function boot() {
       }
       playHuman(ctx.idx);
     });
-    g.onBackgroundClick(() => clearSelection());
+    g.onBackgroundClick(() => {
+      clearSelection();
+      clearFuture();
+    });
 
     state.booted = true;
     els.backendBadge.textContent = g.backend === "WebGPU" ? "WebGPU" : "WebGL2";
@@ -1005,7 +1812,8 @@ async function boot() {
       ? `${loader.gpuBackend} · ${describeLoader(loader)}`
       : loader.reason || "WebGL2 폴백";
 
-    newGame();
+    loadProgress();
+    startTitle();
     els.bootOverlay.classList.add("hidden");
     setInterval(() => {
       if (!state.graph) return;
@@ -1013,7 +1821,29 @@ async function boot() {
       els.fpsBadge.textContent = `${st.fps || 0} FPS`;
       els.fpsBadge.classList.toggle("dim", !st.fps);
     }, 1000);
-    window.__parksyGo = { engine: () => state.engine, graph: () => state.graph, state, newGame };
+    if (!state.board3d) {
+      setInterval(updateBoardOverlay, 120);
+      updateBoardOverlay();
+    }
+    window.__parksyGo = {
+      engine: () => state.engine,
+      graph: () => state.graph,
+      board3d: () => state.board3d,
+      state,
+      newGame,
+      startTitle,
+      startStory: () => loadStoryScene(firstScene()),
+      loadScene: (id) => loadStoryScene(sceneById(id)),
+      startFree: startFreeMode,
+      scenes: ALL_SCENES,
+      play: (coord) => playHuman(coordIndex(coord, state.engine.size)),
+      preview: (coord) => previewFuture(coordIndex(coord, state.engine.size)),
+      confirm: confirmFuture,
+      futureMode: setFutureMode,
+      ask: askHint,
+      fitBoard,
+      fitTitleBoard,
+    };
   } catch (e) {
     console.error(e);
     els.bootText.textContent = `부팅 실패: ${e.message}`;
@@ -1063,9 +1893,40 @@ els.territoryBtn.addEventListener("click", () => {
   updateUI();
 });
 
+// ── 게임 UI
+els.titleBtn.addEventListener("click", () => startTitle());
+els.storyExitBtn.addEventListener("click", () => startTitle());
+els.startStoryBtn.addEventListener("click", () => loadStoryScene(firstScene()));
+els.continueBtn.addEventListener("click", () => {
+  const scene = nextUnfinishedScene() || firstScene();
+  loadStoryScene(scene);
+});
+els.startFreeBtn.addEventListener("click", () => startFreeMode());
+els.askBtn.addEventListener("click", () => askHint());
+els.futureBtn.addEventListener("click", () => setFutureMode(!state.futureMode));
+els.futurePlayBtn.addEventListener("click", () => confirmFuture());
+els.futureCancelBtn.addEventListener("click", () => setFutureMode(false));
+els.ghostNextBtn.addEventListener("click", () => ghostNext());
+els.ghostCloseBtn.addEventListener("click", () => ghostClose());
+els.completeNextBtn.addEventListener("click", () => {
+  if (state.pendingNext) loadStoryScene(state.pendingNext);
+  else startFreeMode();
+});
+els.completeRetryBtn.addEventListener("click", () => {
+  if (state.story) loadStoryScene(state.story);
+});
+els.completeTitleBtn.addEventListener("click", () => startTitle());
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") {
+    if (state.futureMode) setFutureMode(false);
+    else if (!els.ghostPanel.classList.contains("hidden")) ghostClose();
+  }
+});
+
 // 창 크기 변경 시 카메라를 강제로 되돌리지 않되, 캔버스는 따라가게 한다.
 window.addEventListener("resize", () => {
   if (state.graph) state.graph.resize();
+  updateBoardOverlay();
 });
 
 boot();

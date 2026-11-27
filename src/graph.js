@@ -128,7 +128,7 @@ export async function createGraph(container, data, opts = {}) {
 
   // ── 후처리: 블룸(저사양이면 끔)
   let post = null;
-  if (!low) { try { const { bloom } = await import("three/addons/tsl/display/BloomNode.js"); post = new THREE.PostProcessing(renderer); const sp = pass(scene, camera); post.outputNode = sp.add(bloom(sp, 0.75, 0.45, 0.18)); } catch (e) { post = null; } }
+  if (!low) { try { const { bloom } = await import("three/addons/tsl/display/BloomNode.js"); const Pipeline = THREE.RenderPipeline || THREE.PostProcessing; post = new Pipeline(renderer); const sp = pass(scene, camera); post.outputNode = sp.add(bloom(sp, 0.62, 0.42, 0.14)); } catch (e) { post = null; } }
 
   // ── 스타일(접근자) — 바뀔 때만 버퍼 갱신
   const acc = {
@@ -137,7 +137,11 @@ export async function createGraph(container, data, opts = {}) {
   };
   function restyle() {
     nodes.forEach((n, i) => { const vis = acc.nodeVisibility(n) ? 1 : 0, [r_, g_, b_] = rgba(acc.nodeColor(n)); aCol.set([r_, g_, b_, acc.nodeAlpha(n) * vis], i * 4);
-      aSz[i * 2] = vis * ((acc.nodeSize && acc.nodeSize(n)) || 3.2 + Math.sqrt(acc.nodeVal(n)) * 3.6); aSz[i * 2 + 1] = vis * (acc.nodeHot(n) ? 1 : 0); });
+      // 크기 0은 "숨김"이다. 예전 || 폴백 때문에 0이 기본 크기로 되살아나
+      // 판 위에 잔불(fire) 점들이 떠다니던 것을 막는다.
+      const want = acc.nodeSize ? acc.nodeSize(n) : null;
+      const sz = want === null || want === undefined ? 3.2 + Math.sqrt(acc.nodeVal(n)) * 3.6 : want;
+      aSz[i * 2] = vis * sz; aSz[i * 2 + 1] = vis * (acc.nodeHot(n) ? 1 : 0); });
     links.forEach((l, k) => { const vis = acc.linkVisibility(l) && acc.nodeVisibility(l.source) && acc.nodeVisibility(l.target) ? 1 : 0, w = acc.linkWidth(l) || 0, [r_, g_, b_] = rgba(acc.linkColor(l));
       aECol.set([r_, g_, b_, vis * Math.min(1, acc.linkAlpha(l) + w * 0.25)], k * 4); aEFlow[k] = vis * Math.min(1, (acc.linkDirectionalParticles(l) || 0) / 3); });
     bCol.value.array.set(aCol); bCol.value.needsUpdate = true; bSz.value.array.set(aSz); bSz.value.needsUpdate = true;
@@ -180,6 +184,7 @@ export async function createGraph(container, data, opts = {}) {
 
   // ── 루프
   let last = performance.now(), frames = 0, fps = 0, ft = last, simT = 0;
+  const frameHooks = [];
   function frame() {
     const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
     if (tw) { const k = Math.min(1, (now - tw.t0) / tw.ms), e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; camera.position.lerpVectors(tw.from, tw.to, e); controls.target.lerpVectors(tw.ft, tw.tt, e); if (k >= 1) tw = null; }
@@ -187,6 +192,7 @@ export async function createGraph(container, data, opts = {}) {
     U.dt.value = dt; U.time.value = now / 1000; simT += dt; U.alpha.value = Math.max(0.04, U.alpha.value * 0.992);
     if (GPU) { renderer.compute(step); U.kick.value = -1; } else stepCPU();
     mirror(now);
+    for (let i = 0; i < frameHooks.length; i++) { try { frameHooks[i](dt, now); } catch (e) { /* 훅 하나가 프레임을 죽이지 않게 */ } }
     post ? post.render() : renderer.render(scene, camera);
     frames++; if (now - ft > 1000) { fps = Math.round((frames * 1000) / (now - ft)); frames = 0; ft = now; }
   }
@@ -206,6 +212,7 @@ export async function createGraph(container, data, opts = {}) {
     onNodeClick(f) { if (f === undefined) return onClick; onClick = f; return G; }, onBackgroundClick(f) { if (f === undefined) return onBg; onBg = f; return G; }, onNodeHover(f) { onHover = f; return G; },
     graphData: () => ({ nodes, links }), camera: () => camera, controls: () => controls, renderer: () => renderer, scene: () => scene,
     cameraPosition, zoomToFit,
+    onFrame(fn) { if (typeof fn === "function") frameHooks.push(fn); return G; },
     setTargets(fn) { G._target = fn; targets(); U.alpha.value = 1; return G; }, refreshTargets() { targets(); return G; },
     d3ReheatSimulation() { targets(); U.alpha.value = 1; return G; },
     numDimensions(d) { U.flat.value = d === 2 ? 0.6 : 0; U.alpha.value = 1; return G; },
